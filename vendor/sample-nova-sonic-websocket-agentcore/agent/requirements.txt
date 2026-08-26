@@ -1,0 +1,5 @@
+strands-agents[bidi-all]    # Bidirectional voice agent framework
+aws_sdk_bedrock_runtime     # AWS Bedrock SDK
+fastapi                     # Web framework
+uvicorn[standard]           # ASGI server (includes websockets)
+pyaudio                     # Audio I/O (required by BidiAgent)

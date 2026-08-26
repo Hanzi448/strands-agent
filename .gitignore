@@ -14,8 +14,11 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
-lib64/
+# Anchored to repo root: an unanchored `lib/` also matches `cdk/lib/`,
+# which is CDK *source*, not build output. Python venvs that would need
+# this live under `.venv/`, already ignored below.
+/lib/
+/lib64/
 parts/
 sdist/
 var/
@@ -219,3 +222,23 @@ __marimo__/
 
 context
 CLAUDE.md
+
+# Node / frontend (this repo has a Vite+React frontend; the base
+# template above was Python-only)
+node_modules/
+.vite/
+frontend/dist/
+
+# CDK generated output
+cdk.out/
+.cdk.staging/
+
+# Local env files. The base template only ignored `.env`, which does
+# not match `.env.local` — the sample's debug config uses that name.
+.env.local
+.env.*.local
+!.env.local.example
+!.env.example
+
+# Scratch output from the vendoring/verification steps
+vendor/_*.txt
