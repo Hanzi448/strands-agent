@@ -61,16 +61,44 @@ EventBridge, Bedrock, and SES are all pay-per-use managed services.
 
 ## Storage Model
 
-- **DynamoDB**:
+- **DynamoDB** (defined in `backend/infra/data_stack.py`; on-demand
+  billing, all keys string-typed, all timestamps ISO-8601 UTC):
   - `Clinics` — clinic config: name, type (dental/cosmetic), hours,
-    services, contact info. Partition key `clinic_id`.
+    services, contact info. Partition key `clinic_id`. No secondary
+    index: a clinic is only ever fetched by its own id.
   - `Appointments` — partition key `clinic_id`, sort key
     `appointment_id`. Holds patient reference, time, status,
-    reminder/reschedule history.
+    reminder/reschedule history. Two indexes:
+    - `by-start-time` (`clinic_id` / `starts_at`) — availability
+      checks, the dashboard day view, and the daily background scan
+      are all "this clinic, this time range".
+    - `by-patient` (`clinic_patient` / `starts_at`) — the caller's
+      own appointments, time-ordered, for reschedule and cancel.
+      `clinic_patient` is a composite `{clinic_id}#{patient_id}`
+      attribute written by the tool layer, so the index key is itself
+      clinic-scoped (see Invariants #1); a `patient_id`-only index
+      would be a queryable cross-clinic path and is not allowed.
   - `Patients` — partition key `clinic_id`, sort key `patient_id`.
-    Minimal demo profile (name, contact).
+    Minimal demo profile (name, contact). One index:
+    - `by-phone` (`clinic_id` / `phone`) — a voice caller identifies
+      themselves by phone number, not by id.
   - `Escalations` — partition key `clinic_id`, sort key
-    `escalation_id`. What was flagged, why, resolved status.
+    `escalation_id`. What was flagged, why, resolved status. One index:
+    - `by-created-at` (`clinic_id` / `created_at`) — the dashboard
+      escalation queue, newest first. `status` is a read filter rather
+      than a key: the queue is small enough that filtering beats
+      maintaining a composite status key.
+  - Every index projects ALL attributes — these tables are small and
+    the tool layer reads whole items.
+  - Non-key attribute names and the appointment/escalation status
+    vocabularies are fixed when `backend/tools/` is implemented, not
+    here; DynamoDB only enforces the keys above.
+  - The autonomous-action log the staff dashboard shows is derived from
+    appointment reminder/reschedule history plus `Escalations` — there
+    is no separate actions table.
+  - Tables are destroyed with the stack in non-`prod` environments and
+    retained (with point-in-time recovery and deletion protection) in
+    `prod`.
 - **S3**:
   - Knowledge base source documents, one prefix per clinic
     (`kb/{clinic_id}/...`), feeding the per-clinic Bedrock Knowledge

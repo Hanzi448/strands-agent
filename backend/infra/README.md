@@ -11,9 +11,30 @@ concern, per `context/code-standards.md` -> AWS CDK (Python):
 | `automation_stack.py`  | `ClinicPilot-Dev-Automation`   | EventBridge schedule + background scan Lambda   |
 | `frontend_stack.py`    | `ClinicPilot-Dev-Frontend`     | S3 + CloudFront static hosting                  |
 
-**Every stack is currently an empty skeleton.** The structure, naming,
-and deployment order are in place; resources are added by the later
-items in `context/progress-tracker.md`.
+**Only `data_stack.py` has resources so far** — the four DynamoDB
+tables. The other four stacks are empty skeletons; their structure,
+naming, and deployment order are in place, and resources are added by
+the later items in `context/progress-tracker.md`.
+
+## Tables
+
+Defined in `data_stack.py`, schema and rationale in
+`context/architecture.md` -> Storage Model.
+
+| Table          | PK / SK                        | Indexes                            |
+| -------------- | ------------------------------ | ---------------------------------- |
+| `Clinics`      | `clinic_id`                    | —                                  |
+| `Patients`     | `clinic_id` / `patient_id`     | `by-phone`                         |
+| `Appointments` | `clinic_id` / `appointment_id` | `by-start-time`, `by-patient`      |
+| `Escalations`  | `clinic_id` / `escalation_id`  | `by-created-at`                    |
+
+Every index carries `clinic_id` inside its own partition key, so no
+index is a cross-clinic query path (`architecture.md` -> Invariants #1).
+Key and index names are module constants in `data_stack.py` — import
+them rather than retyping the strings.
+
+In `dev` the tables are destroyed with the stack; in `prod` they are
+retained, with point-in-time recovery and deletion protection on.
 
 Deployment order (declared in `app.py`):
 

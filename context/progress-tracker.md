@@ -5,16 +5,16 @@ Update this file after every meaningful implementation change.
 ## Current Phase
 
 - Phase 1: project skeleton. The AWS sample is vendored as reference
-  code and `backend/infra/` exists as a synthesising CDK app with five
-  empty stacks; the rest of `backend/` and `frontend/` do not exist
-  yet.
+  code and `backend/infra/` is a synthesising CDK app whose data stack
+  now defines the four DynamoDB tables; the other four stacks are still
+  empty, and the rest of `backend/` and `frontend/` do not exist yet.
 
 ## Current Goal
 
-- Continue the project skeleton: with the CDK app standing, define the
-  DynamoDB table schemas in the data stack, then the backend package
-  structure, the frontend adapted from the vendored AWS Nova Sonic
-  sample, and seed script stubs.
+- With the tables defined, move from infrastructure to logic: build
+  `backend/tools/` against these tables, then the agents on top of it.
+  The KB bucket, the backend package structure, the frontend adapted
+  from the vendored AWS Nova Sonic sample, and the seed scripts follow.
 
 ## Completed
 
@@ -44,23 +44,45 @@ Update this file after every meaningful implementation change.
   templates, `cdk list` shows all five, and the synthesised manifest
   carries the intended dependency edges.
 
+- **DynamoDB table schemas in the data stack** (Next Up #1).
+  `data_stack.py` defines `Clinics` (PK `clinic_id`), `Patients`
+  (PK `clinic_id`, SK `patient_id`), `Appointments` (PK `clinic_id`,
+  SK `appointment_id`), and `Escalations` (PK `clinic_id`, SK
+  `escalation_id`) as `TableV2` constructs, on-demand billing, physical
+  names from `ProjectConfig`. Four GSIs, each carrying `clinic_id`
+  inside its own partition key so no index is a cross-clinic query path
+  (`architecture.md` -> Invariants #1): appointments `by-start-time`
+  and `by-patient`, patients `by-phone`, escalations `by-created-at`.
+  Key attribute names and index names are module constants, since the
+  tool layer and the seed scripts must spell them identically. Table
+  names are exported via `CfnOutput` for the out-of-CDK consumers (seed
+  scripts, CLI); in-app stacks will take the table objects directly.
+  The schema and the reasoning behind each index are recorded in
+  `architecture.md` -> Storage Model. Verified: `cdk synth` exits 0 and
+  the Data template carries the four tables with the intended keys,
+  indexes, and ALL projections; a `CLINICPILOT_ENV=prod` synth
+  confirmed the environment branch (RETAIN + PITR + deletion protection
+  in `prod`, DESTROY in `dev`) and its artifacts were removed.
+
 ## In Progress
 
 - None yet.
 
 ## Next Up
 
-1. Define DynamoDB table schemas (`Clinics`, `Appointments`,
-   `Patients`, `Escalations`) in the data stack.
-2. Implement `backend/tools/` business logic functions
+1. Implement `backend/tools/` business logic functions
    (availability check, booking, reschedule, FAQ query, escalate)
-   against the DynamoDB tables.
-3. Build the Orchestrator agent + Scheduling/FAQ/Escalation
+   against the DynamoDB tables. This is where non-key attribute names
+   and the appointment/escalation status vocabularies get fixed.
+2. Build the Orchestrator agent + Scheduling/FAQ/Escalation
    sub-agents (Agent-as-Tool pattern), test locally with a text
    interface before wiring voice.
-4. Wire Nova Sonic + BidiAgent voice on top of the working
+3. Wire Nova Sonic + BidiAgent voice on top of the working
    text-agent logic.
-5. Deploy to AgentCore Runtime, verify voice session end-to-end.
+4. Deploy to AgentCore Runtime, verify voice session end-to-end.
+5. Add the Knowledge Base source S3 bucket to the data stack
+   (`kb/{clinic_id}/` prefixes) and the Bedrock Knowledge Base over it
+   in the agent stack — these deploy together, so they are one unit.
 6. Build the background Lambda + EventBridge schedule, reusing
    `backend/tools/` functions.
 7. Build the staff dashboard (Cognito auth, appointment list,
@@ -136,6 +158,25 @@ Update this file after every meaningful implementation change.
   initial fork as reference code, not final code"). `architecture.md`
   → System Boundaries does not list `vendor/`; added here as the
   location for pinned third-party reference code.
+- **Tenant scoping is enforced in the index keys, not by convention** —
+  the appointments-by-patient GSI is keyed on a composite
+  `clinic_patient` (`{clinic_id}#{patient_id}`) attribute rather than on
+  `patient_id`. A `patient_id`-keyed index would work (ids are unique
+  across clinics) but would make a cross-clinic query *expressible*,
+  which `architecture.md` -> Invariants #1 rules out. Costs one written
+  attribute; buys an invariant the schema enforces instead of the
+  reviewer.
+- **No separate agent-actions table** — the dashboard's "log of
+  autonomous actions" is derived from appointment reminder/reschedule
+  history plus `Escalations`. `architecture.md` -> Storage Model names
+  four tables and puts that history on the appointment; a fifth table
+  would duplicate it.
+- **Escalation `status` is a filter, not a key** — the dashboard reads
+  a clinic's escalations newest-first from one GSI and filters to open
+  ones, rather than maintaining a composite status key. The queue is
+  small by construction (the agent escalates only when a human decision
+  is needed), so the composite key would cost write complexity for no
+  measurable read benefit.
 - **Stack files live directly in `backend/infra/`, not a `stacks/`
   subpackage** — `architecture.md` → System Boundaries names
   `backend/infra/data_stack.py` etc. by path, so the flat layout is
@@ -153,6 +194,17 @@ Update this file after every meaningful implementation change.
   be worse. The TS stacks are read as AgentCore wiring references.
 
 ## Session Notes
+
+- **`TableV2`, not `Table`, for the DynamoDB tables.** `TableV2` is the
+  current construct and takes the environment branch (removal policy,
+  PITR, deletion protection) cleanly; single-region is just "no
+  replicas". It synthesises as `AWS::DynamoDB::GlobalTable` rather than
+  `AWS::DynamoDB::Table` — expected, but worth knowing before reading a
+  template or a console page and wondering. Note also that constructing
+  a `TableV2` emits `TableGrantsProps#encryptedResource` /
+  `#policyResource` deprecation warnings from inside aws-cdk-lib 2.266
+  itself; they are not caused by anything this app passes and there is
+  nothing to fix on our side.
 
 - **Two `.gitignore` faults found while vendoring** (both fixed):
   (1) the root `.gitignore` was the stock Python template, whose
