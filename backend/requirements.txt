@@ -1,0 +1,3 @@
+# Runtime dependencies for the tool layer, agents, and Lambda handlers.
+# Strands / AgentCore packages are added when `backend/agents/` lands.
+boto3>=1.35

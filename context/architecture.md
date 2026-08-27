@@ -37,7 +37,18 @@ EventBridge, Bedrock, and SES are all pay-per-use managed services.
   agents (appointment CRUD, KB query, notification dispatch). These
   are the **single source of truth** for mutating data — both the
   live agent and the background Lambda call into this layer, never
-  duplicate logic.
+  duplicate logic. Its foundation modules: `schema.py` (item attribute
+  names, status vocabularies, key/timestamp encodings — see Storage
+  Model), `validation.py` (the boundary checks every tool runs first,
+  including the `clinic_id` guard), `dynamo.py` (table handles,
+  resolved from environment variables the CDK sets), `errors.py` (the
+  exception vocabulary tools raise). Nothing here imports Strands or
+  AgentCore, so the layer stays callable from a Lambda, a seed script,
+  or a test with no agent runtime present.
+- `backend/tests/` — Pytest suite for `backend/tools/`. Run from
+  `backend/` (`pytest.ini` puts the package on the path); dependencies
+  in `backend/requirements-dev.txt`. Not a runtime boundary, listed
+  here because it is the verification step for every tool unit.
 - `backend/lambda/` — Lambda handlers: `background_scan.py`
   (EventBridge-triggered autonomous loop), `dashboard_api.py`
   (Cognito-protected REST handlers for the staff dashboard),
@@ -91,8 +102,23 @@ EventBridge, Bedrock, and SES are all pay-per-use managed services.
   - Every index projects ALL attributes — these tables are small and
     the tool layer reads whole items.
   - Non-key attribute names and the appointment/escalation status
-    vocabularies are fixed when `backend/tools/` is implemented, not
-    here; DynamoDB only enforces the keys above.
+    vocabularies are fixed in `backend/tools/schema.py`, not here;
+    DynamoDB only enforces the keys above. That module is also where
+    the timestamp encoding is fixed — one format
+    (`2026-08-27T14:30:00Z`: UTC, second precision, `Z` suffix),
+    because `starts_at` and `created_at` are sort keys and DynamoDB
+    compares strings bytewise, so mixed offsets or precisions would
+    order items wrongly with no error. Appointment statuses:
+    `scheduled`, `cancelled`, `completed`, `no_show` — a reschedule is
+    not a status, it moves `starts_at` and appends to the appointment's
+    reschedule history. Escalation statuses: `open`, `resolved`.
+    The key attribute and index names are necessarily written in both
+    `schema.py` and `data_stack.py` (business logic must not depend on
+    `aws-cdk-lib`); `backend/tests/test_schema_matches_infra.py` fails
+    if the two ever disagree.
+  - The nested shapes of the clinic's `hours` and `services` config are
+    not fixed yet — they are availability-logic decisions, tracked as an
+    open question in `progress-tracker.md`.
   - The autonomous-action log the staff dashboard shows is derived from
     appointment reminder/reschedule history plus `Escalations` — there
     is no separate actions table.

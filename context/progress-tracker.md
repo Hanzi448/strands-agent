@@ -4,17 +4,22 @@ Update this file after every meaningful implementation change.
 
 ## Current Phase
 
-- Phase 1: project skeleton. The AWS sample is vendored as reference
-  code and `backend/infra/` is a synthesising CDK app whose data stack
-  now defines the four DynamoDB tables; the other four stacks are still
-  empty, and the rest of `backend/` and `frontend/` do not exist yet.
+- Phase 2: business logic. The AWS sample is vendored as reference
+  code, `backend/infra/` synthesises with the four DynamoDB tables
+  defined (the other four stacks are still empty), and `backend/tools/`
+  now exists as a tested foundation — item schema, status vocabularies,
+  validation, table handles — with no tool functions on it yet.
+  `frontend/`, `backend/agents/`, `backend/lambda/`, and `seed/` do not
+  exist yet.
 
 ## Current Goal
 
-- With the tables defined, move from infrastructure to logic: build
-  `backend/tools/` against these tables, then the agents on top of it.
-  The KB bucket, the backend package structure, the frontend adapted
-  from the vendored AWS Nova Sonic sample, and the seed scripts follow.
+- Build the tool functions on the `backend/tools/` foundation, one at a
+  time, starting with scheduling. The first one (availability) is
+  blocked on a spec decision — the `Clinics` config shape — so that
+  decision is the next item, not the code. The agents, the KB bucket,
+  the frontend adapted from the vendored AWS Nova Sonic sample, and the
+  seed scripts follow.
 
 ## Completed
 
@@ -64,34 +69,104 @@ Update this file after every meaningful implementation change.
   confirmed the environment branch (RETAIN + PITR + deletion protection
   in `prod`, DESTROY in `dev`) and its artifacts were removed.
 
+- **`backend/tools/` foundation: item schema, validation, table
+  handles** (first unit split out of the old Next Up #1). Four modules
+  plus a 66-test suite, all passing.
+  `schema.py` fixes what `architecture.md` -> Storage Model explicitly
+  deferred to this layer: non-key attribute names for all four tables
+  (`ClinicAttrs`, `PatientAttrs`, `AppointmentAttrs`,
+  `EscalationAttrs`), the status vocabularies (`AppointmentStatus`,
+  `EscalationStatus`, `EscalationSource`, `ClinicType`), and the key
+  and timestamp *encodings* — `clinic_patient_key` for the `by-patient`
+  composite and one ISO-8601 UTC format for every timestamp.
+  `validation.py` holds the boundary checks, `require_clinic_id` first
+  among them (`code-standards.md` -> Python). `dynamo.py` resolves
+  table names from environment variables the CDK will set, falling back
+  to the same naming scheme `backend/infra/config.py` uses.
+  `errors.py` is the exception vocabulary. Deliberately *not* fixed
+  here: the nested shapes of the clinic's `hours`/`services` and the
+  entry shape of the appointment history lists — those are tool-level
+  decisions, now Next Up #1 and an open question.
+  Verified: `pytest` from `backend/` — 66 passed. The suite covers
+  lexicographic sort-key ordering across mixed offsets, composite-key
+  ambiguity, phone-format convergence, table-name resolution, and the
+  tools/infra drift guard (see Session Notes). `get_table` itself is
+  not covered: it needs credentials and a live boto3 resource, so it
+  is exercised by the first tool that queries.
+
 ## In Progress
 
-- None yet.
+- None.
 
 ## Next Up
 
-1. Implement `backend/tools/` business logic functions
-   (availability check, booking, reschedule, FAQ query, escalate)
-   against the DynamoDB tables. This is where non-key attribute names
-   and the appointment/escalation status vocabularies get fixed.
-2. Build the Orchestrator agent + Scheduling/FAQ/Escalation
+The old item 1 ("implement `backend/tools/`") bundled five unrelated
+tool families, which `ai-workflow-rules.md` -> When to Split Work
+forbids in one step. Its foundation is done (see Completed); the
+remaining tools are split out below, one per unit.
+
+1. **Spec step, not code: fix the `Clinics` config shape** in
+   `architecture.md` — opening hours per weekday, closures/holidays,
+   the service list with a duration per service, and slot granularity.
+   `backend/tools/schema.py` fixed the attribute *names* (`hours`,
+   `services`) but deliberately left the nested value shapes open,
+   because they are availability rules, and
+   `ai-workflow-rules.md` forbids inventing them inline. Availability,
+   booking, and the seed scripts all read them, so this is decided
+   once, first. See Open Questions.
+2. `check_availability` in `backend/tools/scheduling.py` — read-only,
+   queries the `by-start-time` index, subtracts appointments in
+   `ACTIVE_APPOINTMENT_STATUSES` from the clinic's configured hours.
+3. `book_appointment` — plus the patient lookup-or-create by phone
+   (the `by-phone` index) that booking needs to resolve a caller.
+4. `reschedule_appointment` and `cancel_appointment` — the two writes
+   that share the reschedule-history append.
+5. Escalation tools — create, list open, mark resolved.
+6. Build the Orchestrator agent + Scheduling/FAQ/Escalation
    sub-agents (Agent-as-Tool pattern), test locally with a text
    interface before wiring voice.
-3. Wire Nova Sonic + BidiAgent voice on top of the working
+7. Wire Nova Sonic + BidiAgent voice on top of the working
    text-agent logic.
-4. Deploy to AgentCore Runtime, verify voice session end-to-end.
-5. Add the Knowledge Base source S3 bucket to the data stack
+8. Deploy to AgentCore Runtime, verify voice session end-to-end.
+9. Add the Knowledge Base source S3 bucket to the data stack
    (`kb/{clinic_id}/` prefixes) and the Bedrock Knowledge Base over it
    in the agent stack — these deploy together, so they are one unit.
-6. Build the background Lambda + EventBridge schedule, reusing
-   `backend/tools/` functions.
-7. Build the staff dashboard (Cognito auth, appointment list,
-   escalation queue).
-8. Seed the two demo clinics (dental, cosmetic) with config,
-   sample appointments, and FAQ documents for the Knowledge Base.
-9. Architecture diagram, README, demo video, submission assets.
+   The FAQ query tool lands with them, since it has nothing to query
+   until the KB exists.
+10. Build the background Lambda + EventBridge schedule, reusing
+    `backend/tools/` functions.
+11. Build the staff dashboard (Cognito auth, appointment list,
+    escalation queue).
+12. Seed the two demo clinics (dental, cosmetic) with config,
+    sample appointments, and FAQ documents for the Knowledge Base.
+13. Architecture diagram, README, demo video, submission assets.
 
 ## Open Questions
+
+- **What is the shape of a clinic's `hours` and `services` config?**
+  (Next Up #1 — blocks the availability tool.) `schema.py` fixed the
+  attribute names and stopped there, because everything below them is
+  an availability rule rather than a storage detail. Undecided:
+  (a) how opening hours are expressed — per weekday with open/close
+  times, and whether a clinic can have a lunch break or split shift;
+  (b) how one-off closures/holidays are represented, or whether the
+  demo simply has none; (c) whether a service carries a duration (so a
+  45-minute consult blocks a different span than a 15-minute check-up)
+  or every appointment is one fixed-length slot; (d) slot granularity —
+  the interval availability is offered on (15/30 minutes), and whether
+  it is per clinic or global. The two demo clinics differ by design
+  ("different hours, services" — `project-overview.md` Goal 2), so
+  this has to hold at least two genuinely different configurations.
+  Decide in `architecture.md` -> Storage Model before writing
+  `check_availability`; the seed scripts write whatever is chosen.
+
+- **What does one entry in an appointment's `reminders` /
+  `reschedule_history` list contain?** Deferred, not blocking: the
+  attribute names exist, and the tools that write them (reminder
+  dispatch, auto-reschedule) are the ones that decide the entry shape.
+  Worth settling before the dashboard reads them, since
+  `architecture.md` -> Storage Model derives the autonomous-action log
+  from exactly these two lists plus `Escalations`.
 
 - **AWS region**: defaulting to `us-east-1` in `architecture.md` —
   confirm before first deploy (Nova Sonic also available in
@@ -193,7 +268,77 @@ Update this file after every meaningful implementation change.
   deployment story, and mixing two CDK toolchains in one repo would
   be worse. The TS stacks are read as AgentCore wiring references.
 
+- **The item schema lives in `backend/tools/schema.py`, and its overlap
+  with the CDK is guarded by a test rather than by an import.** The
+  tool layer cannot import `data_stack.py` (that would make business
+  logic depend on `aws-cdk-lib`, and the two run in different venvs),
+  and the CDK app should not depend on the tool package either. So key
+  attribute names and index names are written in both places. The
+  failure mode this creates is nasty and silent — DynamoDB answers a
+  query against a misspelled key or a missing index with an empty
+  result, inside a deployed Lambda, not here — so
+  `backend/tests/test_schema_matches_infra.py` reads `data_stack.py`
+  with `ast` (no CDK needed) and fails if any of the twelve shared
+  constants disagree. It also imports `backend/infra/config.py`
+  directly (pure stdlib) and asserts `dynamo.table_name` derives
+  exactly what `ProjectConfig.resource_name` produces, so the *scheme*
+  is compared, not just its default values.
+
+- **One timestamp encoding, because timestamps are sort keys.** Every
+  timestamp this layer writes goes through `to_iso8601`:
+  `2026-08-27T14:30:00Z`, UTC, second precision, `Z` suffix, fixed
+  width. `starts_at` and `created_at` are sort keys and DynamoDB
+  compares strings bytewise, so a `+02:00` offset or a microsecond
+  component would order items wrongly with no error at all. This is
+  cheap now and unfixable-in-place later, once a table has mixed data.
+
+- **Tool functions raise, they do not return error strings.** A tool
+  that returned `{"error": ...}` would let a caller that forgot to
+  check it hand an error message to a patient as an answer. The
+  exceptions carry a stable `code`, and the `backend/agents/` wrappers
+  are the layer that turns them into something a model can read.
+
+- **A reschedule is not an appointment status.** It moves `starts_at`
+  and appends to the appointment's reschedule history while the status
+  stays `scheduled`. A `rescheduled` status would make "is this slot
+  taken" a two-value check and would split the history the dashboard's
+  autonomous-action log is derived from.
+
+- **`ACTIVE_APPOINTMENT_STATUSES` is a set, not a `!= cancelled`
+  check.** Availability, the day view, and the background scan all
+  need "does this occupy its slot", and encoding that once means adding
+  a future status is one edit rather than a hunt through comparisons.
+
+- **Escalation `reason` is free text; `source` is an enum.** `reason`
+  is written by the Escalation sub-agent and read by a human on the
+  dashboard or in an SES email — it has no machine reader, and a closed
+  reason vocabulary would be product behavior no context file defines.
+  `source` is `voice` or `background` because
+  `project-overview.md` describes exactly those two paths feeding one
+  queue, and the queue has to show which is which.
+
+- **Phone numbers are normalised at the boundary, not at read time.**
+  The `by-phone` index is an equality match, so "555 123 4567" from
+  speech and "+15551234567" from a seed script have to converge before
+  either is stored, or the caller lookup silently misses.
+
 ## Session Notes
+
+- **Second venv: `backend/.venv`**, on 3.12 like the infra one, with
+  `boto3` + `pytest` from `backend/requirements-dev.txt` (runtime deps
+  stay in `requirements.txt` so a Lambda bundle never ships the test
+  runner). Run the suite as `.venv\Scripts\python.exe -m pytest` from
+  `backend/` — `backend/pytest.ini` sets `pythonpath = .` so `tools`
+  imports as a package. Two venvs rather than one because the CDK app
+  pulls `aws-cdk-lib` and the tool layer must not.
+
+- **boto3 is imported lazily inside `dynamo.py`**, not at module top.
+  It keeps `tools.schema` and `tools.validation` pure-stdlib and
+  importable with no AWS SDK present, which is what lets most of the
+  suite run without touching boto3 at all. The boto3 resource and the
+  table handles are `lru_cache`d — cold-start cost, and they are
+  stateless client handles, not the per-session state
+  `code-standards.md` forbids at module level.
 
 - **`TableV2`, not `Table`, for the DynamoDB tables.** `TableV2` is the
   current construct and takes the environment branch (removal policy,
