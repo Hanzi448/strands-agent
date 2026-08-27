@@ -5,13 +5,16 @@ Update this file after every meaningful implementation change.
 ## Current Phase
 
 - Phase 1: project skeleton. The AWS sample is vendored as reference
-  code; our own `backend/` and `frontend/` trees do not exist yet.
+  code and `backend/infra/` exists as a synthesising CDK app with five
+  empty stacks; the rest of `backend/` and `frontend/` do not exist
+  yet.
 
 ## Current Goal
 
-- Stand up the project skeleton: CDK app with empty stacks, backend
-  package structure, frontend adapted from the vendored AWS Nova Sonic
-  sample, seed script stubs.
+- Continue the project skeleton: with the CDK app standing, define the
+  DynamoDB table schemas in the data stack, then the backend package
+  structure, the frontend adapted from the vendored AWS Nova Sonic
+  sample, and seed script stubs.
 
 ## Completed
 
@@ -26,33 +29,45 @@ Update this file after every meaningful implementation change.
   Files. Also fixed two `.gitignore` faults this surfaced — see
   Session Notes.
 
+- **`backend/infra/` CDK app with five stack skeletons**
+  (Next Up #1, superseding the numbering below).
+  `app.py` instantiates `DataStack`, `AgentStack`, `ApiStack`,
+  `AutomationStack`, `FrontendStack` (`ClinicPilot-Dev-*`), each an
+  empty `Stack` subclass carrying a docstring of its planned contents
+  and the `architecture.md` section that defines them. No resources
+  yet, by design. `config.py` holds the single `ProjectConfig` every
+  stack receives, so no name or ARN is hardcoded or duplicated across
+  stacks (`code-standards.md` → AWS CDK). Deployment order declared
+  now (`data` → `agent`/`api`/`automation`, `api` → `frontend`) so
+  `cdk deploy --all` is correct from the first stack that gains a
+  resource. Verified: `cdk synth` exits 0 and writes all five
+  templates, `cdk list` shows all five, and the synthesised manifest
+  carries the intended dependency edges.
+
 ## In Progress
 
 - None yet.
 
 ## Next Up
 
-1. Stand up `backend/infra/` CDK app with stack skeletons
-   (data, agent, api, automation, frontend) — no resources yet,
-   just the structure.
-2. Define DynamoDB table schemas (`Clinics`, `Appointments`,
+1. Define DynamoDB table schemas (`Clinics`, `Appointments`,
    `Patients`, `Escalations`) in the data stack.
-3. Implement `backend/tools/` business logic functions
+2. Implement `backend/tools/` business logic functions
    (availability check, booking, reschedule, FAQ query, escalate)
    against the DynamoDB tables.
-4. Build the Orchestrator agent + Scheduling/FAQ/Escalation
+3. Build the Orchestrator agent + Scheduling/FAQ/Escalation
    sub-agents (Agent-as-Tool pattern), test locally with a text
    interface before wiring voice.
-5. Wire Nova Sonic + BidiAgent voice on top of the working
+4. Wire Nova Sonic + BidiAgent voice on top of the working
    text-agent logic.
-6. Deploy to AgentCore Runtime, verify voice session end-to-end.
-7. Build the background Lambda + EventBridge schedule, reusing
+5. Deploy to AgentCore Runtime, verify voice session end-to-end.
+6. Build the background Lambda + EventBridge schedule, reusing
    `backend/tools/` functions.
-8. Build the staff dashboard (Cognito auth, appointment list,
+7. Build the staff dashboard (Cognito auth, appointment list,
    escalation queue).
-9. Seed the two demo clinics (dental, cosmetic) with config,
+8. Seed the two demo clinics (dental, cosmetic) with config,
    sample appointments, and FAQ documents for the Knowledge Base.
-10. Architecture diagram, README, demo video, submission assets.
+9. Architecture diagram, README, demo video, submission assets.
 
 ## Open Questions
 
@@ -78,7 +93,7 @@ Update this file after every meaningful implementation change.
   credentials (`frontend/src/aws-credentials.ts`,
   `websocket-presigned.ts`). SigV4 requires *some* AWS credential, so
   "no auth" cannot mean "no credential". Options to decide before
-  item 5 (voice wiring): (a) Cognito identity pool with
+  item 4 (voice wiring): (a) Cognito identity pool with
   **unauthenticated/guest** identities enabled — keeps the sample's
   presigning path intact, patients never see a login, still no
   patient accounts; (b) put our own Lambda/API Gateway WebSocket in
@@ -88,6 +103,10 @@ Update this file after every meaningful implementation change.
   spec, listed only for completeness. Leaning (a) as the smallest
   change from working sample code, but this needs an explicit
   decision and an `architecture.md` update, not a silent default.
+- **Local Python is 3.11, `code-standards.md` requires 3.12+.** The CDK
+  app synthesises fine on 3.11, so this did not block the CDK skeleton,
+  but Nova Sonic / BidiAgent genuinely require 3.12+. Install 3.12
+  before the agent work starts (Next Up #3), not at the point it fails.
 
 ## Architecture Decisions
 
@@ -121,6 +140,15 @@ Update this file after every meaningful implementation change.
   initial fork as reference code, not final code"). `architecture.md`
   → System Boundaries does not list `vendor/`; added here as the
   location for pinned third-party reference code.
+- **Stack files live directly in `backend/infra/`, not a `stacks/`
+  subpackage** — `architecture.md` → System Boundaries names
+  `backend/infra/data_stack.py` etc. by path, so the flat layout is
+  what the spec already describes. `config.py` sits alongside them as
+  the one place names are defined; `app.py` is the CDK entrypoint.
+- **Environment is a config value, not a separate CDK app** — one
+  `ProjectConfig` read from `CLINICPILOT_ENV` (default `dev`) prefixes
+  every stack and resource name, so a second environment is an env var
+  rather than a code change. Only `dev` is deployed for the hackathon.
 - **Sample's TypeScript CDK is reference-only; our CDK stays Python**
   — the sample ships five TS stacks. Re-implementing in Python CDK
   costs more than copying them, but `architecture.md` → Stack and
@@ -145,7 +173,17 @@ Update this file after every meaningful implementation change.
   genuine re-style rather than a light adaptation. The behavioral
   parts (audio worklet, presigned WebSocket, `useVoiceAgent` hook)
   carry over; the presentational components mostly do not. Worth
-  budgeting for when item 5 comes up.
+  budgeting for when item 4 comes up.
+- **CDK CLI is not installed globally; `npx aws-cdk@2` was used** to
+  verify `synth`/`list`. On Windows the CLI spawns the app through
+  `cmd.exe`, which rejects a forward-slash venv path — the app must be
+  passed as `.venv\Scripts\python.exe app.py` when the venv is not
+  activated. Recorded in `backend/infra/README.md` so it isn't
+  rediscovered.
+- **`Stack.add_dependency` is deprecated in aws-cdk-lib 2.266**; used
+  `add_stack_dependency` instead. Worth watching for other deprecated
+  APIs when copying wiring out of the vendored TS stacks, which pin an
+  older CDK.
 - Hackathon context: AWS "Agents for Humans" hackathon, Strands
   Agents SDK, Professional Agents track, $40k prize pool, 2-3 week
   build window (not the full 6-week program length).

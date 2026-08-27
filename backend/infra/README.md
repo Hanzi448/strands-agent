@@ -1,0 +1,70 @@
+# ClinicPilot infrastructure (AWS CDK, Python)
+
+All AWS resources for ClinicPilot are defined here. One stack per
+concern, per `context/code-standards.md` -> AWS CDK (Python):
+
+| Stack file             | Stack name                     | Owns                                            |
+| ---------------------- | ------------------------------ | ----------------------------------------------- |
+| `data_stack.py`        | `ClinicPilot-Dev-Data`         | DynamoDB tables, knowledge base S3 bucket       |
+| `agent_stack.py`       | `ClinicPilot-Dev-Agent`        | AgentCore Runtime + Memory, Bedrock Knowledge Base |
+| `api_stack.py`         | `ClinicPilot-Dev-Api`          | API Gateway, API Lambdas, Cognito (staff)       |
+| `automation_stack.py`  | `ClinicPilot-Dev-Automation`   | EventBridge schedule + background scan Lambda   |
+| `frontend_stack.py`    | `ClinicPilot-Dev-Frontend`     | S3 + CloudFront static hosting                  |
+
+**Every stack is currently an empty skeleton.** The structure, naming,
+and deployment order are in place; resources are added by the later
+items in `context/progress-tracker.md`.
+
+Deployment order (declared in `app.py`):
+
+```
+data ──┬─> agent ──> api ──> frontend
+       ├─> api
+       └─> automation
+```
+
+## Naming
+
+No stack hardcodes a resource name or ARN. `config.py` holds the single
+`ProjectConfig` that every stack receives, and all names come from it:
+
+- `config.resource_name("appointments")` -> `clinicpilot-dev-appointments`
+- `config.stack_name("data")` -> `ClinicPilot-Dev-Data`
+
+Overridable via environment variables: `CLINICPILOT_PROJECT_PREFIX`,
+`CLINICPILOT_ENV`, and CDK's own `CDK_DEFAULT_ACCOUNT` /
+`CDK_DEFAULT_REGION` (`AWS_REGION` as a fallback). Region defaults to
+`us-east-1` -- still an open question in the tracker, confirm before the
+first real deploy.
+
+## Setup
+
+Python 3.12+ (`context/code-standards.md`), and the CDK CLI:
+
+```bash
+cd backend/infra
+python -m venv .venv
+.venv/Scripts/activate        # Windows;  source .venv/bin/activate on macOS/Linux
+pip install -r requirements.txt
+npm install -g aws-cdk        # or use npx aws-cdk@2 below
+```
+
+## Commands
+
+```bash
+cdk list                      # the five stacks
+cdk synth                     # synthesise all templates to cdk.out/
+cdk deploy --all              # deploy in dependency order
+cdk destroy --all
+```
+
+If the CDK CLI is not installed globally, prefix with `npx aws-cdk@2`.
+On Windows, when the venv is not activated, point the CLI at the venv
+interpreter with a backslash path -- CDK spawns the app through
+`cmd.exe`, which does not accept `.venv/Scripts/python.exe`:
+
+```bash
+npx aws-cdk@2 synth --app '.venv\Scripts\python.exe app.py'
+```
+
+`cdk.out/` is generated output -- never edit it, it is gitignored.

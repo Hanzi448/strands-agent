@@ -1,0 +1,3 @@
+# ClinicPilot CDK app. Python 3.12+ (`code-standards.md`).
+aws-cdk-lib>=2.170.0,<3.0.0
+constructs>=10.0.0,<11.0.0
