@@ -15,7 +15,10 @@ availability config"), not here. This module fixes names, vocabularies,
 and the key/timestamp encodings the tables' sort keys depend on -- now
 including the key names *inside* those nested values (`HoursInterval`,
 `ClosureAttrs`, `ServiceAttrs`, `WEEKDAY_KEYS`), landed by
-`tools.scheduling.check_availability`, the first tool that reads them.
+`tools.scheduling.check_availability`, the first tool that reads them, and
+the appointment history entry shapes (`RescheduleEntry`, `ReminderEntry`,
+`RescheduleActor`), landed by `tools.appointments.reschedule_appointment`,
+the first tool that writes one.
 
 The key attribute and index names below must match
 `backend/infra/data_stack.py` exactly;
@@ -122,6 +125,23 @@ class ClinicType(StrEnum):
 
     DENTAL = "dental"
     COSMETIC = "cosmetic"
+
+
+class RescheduleActor(StrEnum):
+    """Who moved or cancelled an appointment, for one `reschedule_history` entry.
+
+    `architecture.md` -> Storage Model fixes these two values and says why
+    they cannot be inferred later: the dashboard's action log exists to show
+    which moves the *agent* made unprompted, and after the fact an agent's
+    reschedule and a staff member's look identical on the item.
+
+    The live voice agent and the background job both write `AGENT`; only the
+    staff dashboard's own API may write `STAFF`. It is never a value a model
+    chooses -- see `tools.appointments.reschedule_appointment`.
+    """
+
+    AGENT = "agent"
+    STAFF = "staff"
 
 
 # --------------------------------------------------------------------------
@@ -240,9 +260,8 @@ class AppointmentAttrs:
     because `architecture.md` -> Storage Model derives the dashboard's
     autonomous-action log from them plus `Escalations` rather than adding
     a fifth table. What one entry contains is specified there too
-    ("Appointment history entry shapes"): `{at, from, to, actor, reason}`
-    and `{at, channel, outcome}`. Those nested key names land here as
-    constants with `reschedule_appointment`, the first tool to write one.
+    ("Appointment history entry shapes") and landed below as
+    `RescheduleEntry` and `ReminderEntry`.
     """
 
     CLINIC_ID: Final[str] = CLINIC_ID
@@ -262,6 +281,45 @@ class AppointmentAttrs:
     RESCHEDULE_HISTORY: Final[str] = "reschedule_history"
     CREATED_AT: Final[str] = CREATED_AT
     UPDATED_AT: Final[str] = "updated_at"
+
+
+class RescheduleEntry:
+    """Keys of one entry in an appointment's `reschedule_history` list.
+
+    `{"at", "from", "to", "actor", "reason"}`, fixed by `architecture.md` ->
+    Storage Model. `AT` is when the move happened and `FROM`/`TO` are the
+    old and new `starts_at`, all three in `ISO8601_FORMAT` -- the same
+    encoding as every other timestamp, since the dashboard renders them
+    beside the appointment's own times. `ACTOR` is a `RescheduleActor`.
+    `REASON` is free text with no machine reader, like an escalation's.
+
+    `TO` is `None` for a **cancellation**. A cancelled appointment is a move
+    to nowhere: `status` alone records that it happened, but not who did it
+    or why, and those are exactly what the dashboard's action log is for.
+    Encoding it here rather than as a fifth appointment attribute keeps the
+    log one list to read (`tools.appointments.cancel_appointment`).
+    """
+
+    AT: Final[str] = "at"
+    FROM: Final[str] = "from"
+    TO: Final[str] = "to"
+    ACTOR: Final[str] = "actor"
+    REASON: Final[str] = "reason"
+
+
+class ReminderEntry:
+    """Keys of one entry in an appointment's `reminders` list.
+
+    `{"at", "channel", "outcome"}`, fixed by `architecture.md` -> Storage
+    Model. `CHANNEL` is `email` (SES is the only one in scope) and `OUTCOME`
+    distinguishes "we reminded them" from "we tried and SES rejected it",
+    which are different facts for staff deciding whether to phone a patient.
+    Their value vocabularies land with the background job, the only writer.
+    """
+
+    AT: Final[str] = "at"
+    CHANNEL: Final[str] = "channel"
+    OUTCOME: Final[str] = "outcome"
 
 
 class EscalationAttrs:

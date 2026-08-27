@@ -3,9 +3,10 @@
 A caller identifies themselves by *saying a phone number*, not by an id
 (`architecture.md` -> Storage Model, `by-phone`), so every patient-facing
 write starts here: this module turns a spoken number into a `patient_id`,
-creating the record the first time. `book_appointment` and, later, the
-reschedule and cancel tools all enter through `lookup_or_create_patient`
-rather than each deciding for themselves who is calling.
+creating the record the first time. `book_appointment` enters through
+`lookup_or_create_patient` and the reschedule and cancel tools through the
+read-only `find_patient`, rather than each deciding for themselves who is
+calling.
 
 **The identity rule**: a caller is the same person as an existing record
 when the *phone number and the name both match*. Phone alone is not
@@ -54,7 +55,7 @@ def find_patients_by_phone(clinic_id: str, phone: str) -> list[dict[str, Any]]:
     A list rather than a single item because a phone number is not a key:
     `by-phone` is `clinic_id` / `phone`, so a household sharing a number
     is several items under one sort key. Deciding *which* of them is
-    calling is `lookup_or_create_patient`'s job, not this function's.
+    calling is `find_patient`'s job, not this function's.
 
     Args:
         clinic_id: The clinic the caller is talking to. The index's own
@@ -139,17 +140,55 @@ def lookup_or_create_patient(
     cleaned_name = require_text(name, "name", max_length=MAX_IDENTIFIER_LENGTH)
     cleaned_email = None if email is None else normalise_email(email, "email")
 
-    wanted = _name_key(cleaned_name)
-    for candidate in find_patients_by_phone(clinic_id, normalised_phone):
-        stored = candidate.get(PatientAttrs.NAME)
-        if isinstance(stored, str) and _name_key(stored) == wanted:
-            if cleaned_email is not None:
-                candidate = _fill_missing_email(candidate, cleaned_email)
-            return candidate, False
+    existing = find_patient(clinic_id, normalised_phone, cleaned_name)
+    if existing is not None:
+        if cleaned_email is not None:
+            existing = _fill_missing_email(existing, cleaned_email)
+        return existing, False
 
     return _create_patient(
         clinic_id, normalised_phone, cleaned_name, cleaned_email
     ), True
+
+
+def find_patient(clinic_id: str, phone: str, name: str) -> dict[str, Any] | None:
+    """The one patient a phone number and a name together identify, if any.
+
+    This module's identity rule, and the *only* place it is applied --
+    `lookup_or_create_patient` decides whether to register a caller by
+    asking this first, and the reschedule and cancel tools decide whose
+    appointments they are allowed to touch by asking the same question.
+    A second implementation of "is this the same person?" is how a
+    household's two patients start swapping appointments.
+
+    Read-only, unlike `lookup_or_create_patient`: a caller asking about an
+    existing appointment must not leave a new patient record behind if the
+    number turns out to be unknown.
+
+    Args:
+        clinic_id: The clinic the caller is talking to. Required.
+        phone: The caller's number, in any spoken form.
+        name: The caller's name, as spoken. Compared through `_name_key`,
+            so case and spacing do not matter.
+
+    Returns:
+        The matching `Patients` item, or `None` if this clinic has no
+        record with that number *and* that name. The first match in
+        registration order if a clinic somehow holds two -- the pair is
+        not a key, so nothing stops a duplicate existing.
+
+    Raises:
+        ValidationError: If `clinic_id`, `phone`, or `name` is missing or
+            malformed.
+    """
+    clinic_id = require_clinic_id(clinic_id)
+    normalised_phone = normalise_phone(phone, "phone")
+    wanted = _name_key(require_text(name, "name", max_length=MAX_IDENTIFIER_LENGTH))
+    for candidate in find_patients_by_phone(clinic_id, normalised_phone):
+        stored = candidate.get(PatientAttrs.NAME)
+        if isinstance(stored, str) and _name_key(stored) == wanted:
+            return candidate
+    return None
 
 
 def _create_patient(

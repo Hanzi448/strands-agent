@@ -30,7 +30,6 @@ not a line of defensive code.
 from __future__ import annotations
 
 from typing import Any
-from zoneinfo import ZoneInfo
 
 from .dynamo import appointments_table
 from .errors import ConflictError
@@ -40,15 +39,13 @@ from .scheduling import (
     get_clinic,
     offerable_slots_for_date,
     resolve_service,
+    unavailable_message,
 )
 from .schema import (
     APPOINTMENT_ID_PREFIX,
     CLINIC_ID,
-    DATE_FORMAT,
-    LOCAL_TIME_FORMAT,
     AppointmentAttrs,
     AppointmentStatus,
-    ClinicAttrs,
     PatientAttrs,
     ServiceAttrs,
     clinic_patient_key,
@@ -64,11 +61,6 @@ from .validation import (
     require_text,
     require_timestamp,
 )
-
-# How many still-free times a "that slot is gone" error names. Enough for
-# the agent to offer a choice out loud without reading a whole day's list
-# to someone.
-_ALTERNATIVES_IN_ERROR = 5
 
 
 def book_appointment(
@@ -167,7 +159,7 @@ def book_appointment(
         None,
     )
     if slot is None:
-        raise ConflictError(_unavailable_message(requested_start, zone, slots, clinic))
+        raise ConflictError(unavailable_message(requested_start, zone, slots, clinic))
 
     # Only now is a record created: a caller who asked for an impossible
     # time should not leave a patient row behind.
@@ -231,41 +223,3 @@ def book_appointment(
         "patient": patient_summary(patient, created),
         AppointmentAttrs.NOTES: note_text,
     }
-
-
-def _unavailable_message(
-    requested_start: str,
-    zone: ZoneInfo,
-    slots: list[dict[str, str]],
-    clinic: dict[str, Any],
-) -> str:
-    """Explain a refused time in terms the agent can say to the patient.
-
-    Names the alternatives rather than only the refusal: the model calling
-    this has just been told "no" about a time the patient chose, and
-    without them its only recovery is another availability round trip --
-    a pause the patient hears. Mirrors `resolve_service`, which lists the
-    clinic's services when it rejects one.
-
-    Deliberately does not say *why* the time is unavailable. Off-grid,
-    too-late-in-the-day, closed, and already-taken would each need the
-    composition rule re-walked to distinguish, which is exactly what this
-    module refuses to do -- and the patient's next step is the same in
-    every case.
-    """
-    local = from_iso8601(requested_start).astimezone(zone)
-    when = f"{local.strftime(LOCAL_TIME_FORMAT)} on {local.strftime(DATE_FORMAT)}"
-    clinic_name = clinic.get(ClinicAttrs.NAME) or "This clinic"
-    if not slots:
-        return (
-            f"{clinic_name} cannot book {when}, and has nothing else free that "
-            "day for this service. Offer another day."
-        )
-    alternatives = ", ".join(
-        slot["local_start"] for slot in slots[:_ALTERNATIVES_IN_ERROR]
-    )
-    more = "" if len(slots) <= _ALTERNATIVES_IN_ERROR else ", and others"
-    return (
-        f"{clinic_name} cannot book {when}; that time is no longer available. "
-        f"Still free that day: {alternatives}{more}."
-    )

@@ -9,23 +9,23 @@ Update this file after every meaningful implementation change.
   defined (the other four stacks are still empty), and `backend/tools/`
   has its foundation, the **complete availability read surface**
   (`check_availability`, one day or a bounded window of up to 14), and
-  the **first write**: `book_appointment` commits a slot and registers
-  the caller. `reschedule_appointment` and `cancel_appointment` are
-  still to come. `frontend/`, `backend/agents/`, `backend/lambda/`, and
-  `seed/` do not exist yet.
+  the **complete scheduling write surface**: `book_appointment`,
+  `reschedule_appointment`, and `cancel_appointment`. The escalation
+  tools are the last of the tool layer. `frontend/`,
+  `backend/agents/`, `backend/lambda/`, and `seed/` do not exist yet.
 
 ## Current Goal
 
-- Continue the tool functions one at a time. Booking now works end to
-  end against the seeded demo configs: check availability, book a slot,
-  and the slot stops being offered. The seam that made that safe —
-  `scheduling.offerable_slots_for_date` — is what the two remaining
-  writes must also re-check against, so they add a state transition
-  each rather than any new availability logic. Next is
-  `reschedule_appointment` and `cancel_appointment`, which share the
-  reschedule-history append. The escalation tools, the agents, the KB
-  bucket, the frontend adapted from the vendored AWS Nova Sonic sample,
-  and the seed scripts follow.
+- Continue the tool functions one at a time. The whole appointment
+  lifecycle now works end to end against the seeded demo configs:
+  check availability, book a slot, move it, cancel it, and see the
+  freed time offered again. All three writes go through one seam,
+  `scheduling.offerable_slots_for_date`, so none of them holds an
+  availability rule of its own. Next is the **escalation tools**
+  (create, list open, mark resolved) — the last of `backend/tools/`,
+  and the one the Escalation sub-agent needs before the agents can be
+  built. The agents, the KB bucket, the frontend adapted from the
+  vendored AWS Nova Sonic sample, and the seed scripts follow.
 
 ## Completed
 
@@ -261,6 +261,75 @@ Update this file after every meaningful implementation change.
 
 - None.
 
+- **`reschedule_appointment` and `cancel_appointment` in
+  `backend/tools/appointments.py`** (Next Up #1). The appointment
+  lifecycle after booking, and the last of the scheduling tools. One
+  module for both, because they are the same operation with a different
+  destination: each has to work out *which* of a caller's appointments
+  is meant, and each writes one entry to the same `reschedule_history`
+  list.
+  **Neither restates the availability rule.** A reschedule re-checks the
+  new time through `scheduling.offerable_slots_for_date`, exactly as
+  `book_appointment` does, and takes its stored `ends_at` from the
+  matched slot. That seam gained one argument to make it work:
+  `exclude_appointment_id`, threaded down to `_booked_spans`. Without
+  it an appointment blocks its own move — any new time within one
+  service length of the old one overlaps the row about to be vacated,
+  so moving a 30-minute cleaning by 15 minutes would refuse itself.
+  **Ownership is the delicate part**, and it is checked once, in
+  `_resolve_appointment`. A caller reaches an appointment only through
+  the `by-patient` partition their own `patients.find_patient` match
+  produces — never by fetching an `appointment_id` by key — so a
+  guessed or carried-over id cannot touch another patient's row, and
+  past or already-cancelled appointments are unreachable by
+  construction rather than by a status check. `patients.py` gained the
+  read-only `find_patient`, extracted from `lookup_or_create_patient`,
+  so the phone-*and*-name identity rule has exactly one
+  implementation; the read half must not register a caller who turns
+  out to be unknown.
+  **A caller with several upcoming appointments is refused, not
+  guessed at.** The `ConflictError` names each one's service, local
+  time, and `appointment_id`, so the agent can ask in a single turn.
+  Taking the soonest would be a silent wrong cancellation — the kind a
+  patient discovers by arriving at a closed clinic.
+  **Both writes are one conditional `update_item`**: the field(s), the
+  `updated_at` stamp, and the history append land together or not at
+  all (an appointment moved without its history entry is a move missing
+  from the staff action log), conditioned on the row still being
+  `scheduled` and still at the time it was read at. Unlike the slot
+  contention documented in `booking.py`, this race is between rows that
+  already exist, so DynamoDB settles it; a lost race is a
+  `ConflictError`, and any other `ClientError` propagates.
+  Landed with them: `schema.RescheduleEntry`, `schema.ReminderEntry`
+  and `schema.RescheduleActor` (the nested history key names
+  `architecture.md` said would arrive with this tool), and
+  `scheduling.unavailable_message` — `booking.py`'s private refusal
+  message, promoted rather than copied, since both writes refuse a time
+  against the same freshly computed slot list.
+  Two spec decisions, both written into `architecture.md` -> Storage
+  Model rather than left in code: a **cancellation writes a
+  `reschedule_history` entry with `to: null`** (a move to nowhere —
+  `status` records that it happened but not who did it or why, which is
+  what the action log is for), and the `by-patient` index is documented
+  as the ownership check, not just a query path. See Open Questions for
+  the one assumption in the first of those.
+  Verified: `pytest` from `backend/` — **315 passed** (254 before, 61
+  new), and the pre-existing 254 still pass unchanged through the
+  `find_patient` and `unavailable_message` refactors. The new suite's
+  fake `Appointments` table evaluates both key conditions and actually
+  *applies* the `UpdateExpression` it is given, so a malformed
+  expression or a missing `if_not_exists` fails here rather than in a
+  deployed Lambda; "now" is monkeypatched, since "upcoming" is relative
+  to it and fixtures that silently fell into the past would stop
+  testing anything. Covered: the household cases (right number wrong
+  name, a housemate's appointment, another patient's id), the
+  self-overlap move, same-time/closed-day/closure/off-grid refusals,
+  duration preserved across a move, the winter/summer offset, the
+  cosmetic clinic answering the same call differently, cancelling
+  freeing the slot for `check_availability`, and the conditional write
+  including a lost race. Each of six guards was mutation-checked —
+  removing it fails at least one test.
+
 ## Next Up
 
 The old item 1 ("implement `backend/tools/`") bundled five unrelated
@@ -269,35 +338,29 @@ forbids in one step. Its foundation, the spec decision that blocked the
 first tool, and the whole availability *read* surface are done (see
 Completed); the remaining tools are split out below, one per unit.
 
-1. `reschedule_appointment` and `cancel_appointment` — the two writes
-   that share the reschedule-history append. Both re-check the target
-   slot through `scheduling.offerable_slots_for_date`, exactly as
-   `book_appointment` does; neither may re-walk `hours`/`closures`.
-   Both find the caller's appointment through the `by-patient` index
-   (`clinic_patient_key`), so `patients.find_patients_by_phone` is the
-   entry point again. The `reschedule_history` entry shape is already
-   specified (`architecture.md` -> Storage Model, "Appointment history
-   entry shapes"); its nested key names land in `schema.py` with this
-   unit, as noted there.
-2. Escalation tools — create, list open, mark resolved.
-3. Build the Orchestrator agent + Scheduling/FAQ/Escalation
+1. Escalation tools — create, list open, mark resolved. The last of
+   `backend/tools/`. `Escalations` is the one table nothing has
+   written yet, and `EscalationStatus`/`EscalationSource` are already
+   fixed in `schema.py`; the `by-created-at` index is the dashboard's
+   newest-first read, filtered to open ones.
+2. Build the Orchestrator agent + Scheduling/FAQ/Escalation
    sub-agents (Agent-as-Tool pattern), test locally with a text
    interface before wiring voice.
-4. Wire Nova Sonic + BidiAgent voice on top of the working
+3. Wire Nova Sonic + BidiAgent voice on top of the working
    text-agent logic.
-5. Deploy to AgentCore Runtime, verify voice session end-to-end.
-6. Add the Knowledge Base source S3 bucket to the data stack
+4. Deploy to AgentCore Runtime, verify voice session end-to-end.
+5. Add the Knowledge Base source S3 bucket to the data stack
    (`kb/{clinic_id}/` prefixes) and the Bedrock Knowledge Base over it
    in the agent stack — these deploy together, so they are one unit.
    The FAQ query tool lands with them, since it has nothing to query
    until the KB exists.
-7. Build the background Lambda + EventBridge schedule, reusing
+6. Build the background Lambda + EventBridge schedule, reusing
    `backend/tools/` functions.
-8. Build the staff dashboard (Cognito auth, appointment list,
+7. Build the staff dashboard (Cognito auth, appointment list,
    escalation queue).
-9. Seed the two demo clinics (dental, cosmetic) with config,
+8. Seed the two demo clinics (dental, cosmetic) with config,
    sample appointments, and FAQ documents for the Knowledge Base.
-10. Architecture diagram, README, demo video, submission assets.
+9. Architecture diagram, README, demo video, submission assets.
 
 ## Open Questions
 
@@ -342,6 +405,32 @@ Completed); the remaining tools are split out below, one per unit.
   dependency here is an experimental voice stack, and a capability
   found missing late costs more than the extra round-trip latency of
   a browser demo.
+- **Should a cancellation appear in the staff action log?** Assumed
+  **yes**, and implemented: `cancel_appointment` appends a
+  `reschedule_history` entry with `to: null`, so who cancelled an
+  appointment and why is visible beside the moves. `architecture.md`
+  specified the entry shape for *moves* and said nothing about
+  cancellations, so this is the one place this unit went past the
+  letter of the spec — flagged rather than buried. The alternative
+  readings were a separate `cancellation_reason` attribute (splits the
+  log into two lists to read) or dropping the reason entirely (`status`
+  then records that it happened but not who did it, which is what the
+  log exists to show). Reversible: the encoding has one writer and, so
+  far, no reader. If it is wrong, say so before the dashboard is built.
+
+- **Can a returning caller who is heard differently reach their own
+  appointment?** No, and this is the phone-number question below in a
+  sharper form. `reschedule_appointment` and `cancel_appointment`
+  require phone *and* name, the same identity rule `book_appointment`
+  uses, because a household shares a number and cancelling a spouse's
+  appointment silently is the failure that rule exists to prevent. The
+  cost is that "Dave" cannot cancel what "David" booked — for a
+  booking that meant a duplicate patient record, but here it means the
+  agent has to escalate. Options if it bites in the demo: (a) match on
+  name *or* an appointment id the patient can read back; (b) accept a
+  fuzzier name match for reads while keeping the strict one for
+  registration. Not blocking, and deliberately not softened on a guess.
+
 - **Does a spoken phone number need a default country code?**
   `normalise_phone` now stores digits only, so every *format* of one
   number converges. What does not converge is a national number against
@@ -609,6 +698,47 @@ Completed); the remaining tools are split out below, one per unit.
   The `by-phone` index is an equality match, so "555 123 4567" from
   speech and "+15551234567" from a seed script have to converge before
   either is stored, or the caller lookup silently misses.
+
+- **Reschedule and cancel live in one module, and a cancellation is a
+  move to nowhere.** They share the part that is easy to get wrong —
+  working out which of a caller's appointments is meant, and proving it
+  is theirs — so splitting them would put that resolution in two
+  places. And a cancel writes the same `reschedule_history` entry a
+  move does, with `to: null`: `status` records that an appointment was
+  called off but not who did it or why, and the dashboard's action log
+  needs both. One list to read rather than a status plus a second
+  attribute.
+
+- **An appointment is reached only through its own patient's index
+  partition, never fetched by id.** Both writes accept an optional
+  `appointment_id`, but it is matched *within* the caller's own
+  `by-patient` result rather than passed to `get_item`. Ownership then
+  holds by construction: a guessed or carried-over id cannot reach
+  another patient's row, and past or already-cancelled appointments are
+  out of reach without a second status check. Costs one query that was
+  needed anyway.
+
+- **A caller with several upcoming appointments is refused, not
+  guessed at.** The error names each one's service, local time, and id,
+  so the agent asks in one turn. Taking the soonest would be a silent
+  wrong cancellation, discovered by the patient at a closed clinic — a
+  failure with no error message anywhere in the system.
+
+- **The appointment being moved does not block its own move.**
+  `offerable_slots_for_date` takes an `exclude_appointment_id`, dropped
+  inside `_booked_spans` where items still have ids. The alternative —
+  cancelling first, then re-checking — would leave a patient with no
+  appointment if the new time turned out to be unavailable, and the
+  alternative to *that* is a second copy of the overlap rule.
+
+- **The two changing writes are conditional; the booking write cannot
+  be.** A move or a cancel is conditioned on the row still being
+  `scheduled` and still at the time it was read at, so two sessions
+  changing one appointment resolve to a single winner. That is possible
+  here and impossible for `book_appointment` for a concrete reason:
+  this race is between rows that already exist, and DynamoDB can
+  condition on a row. The booking race is over a row that does not
+  exist yet.
 
 ## Session Notes
 

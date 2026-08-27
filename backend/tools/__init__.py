@@ -16,6 +16,10 @@ Modules:
         rule for when two calls are the same person.
     booking: `book_appointment` -- the first write. Decides nothing about
         availability itself; it re-asks `scheduling` at write time.
+    appointments: changing a booking that already exists --
+        `reschedule_appointment` and `cancel_appointment`. Works out which
+        of a caller's appointments is meant, and re-asks `scheduling` the
+        same way `booking` does.
 
 Nothing here imports Strands or AgentCore. The `@tool`-decorated agent
 surface lives in `backend/agents/`; this layer stays callable from a

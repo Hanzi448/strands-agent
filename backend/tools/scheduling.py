@@ -66,6 +66,11 @@ from .validation import (
 DEFAULT_AVAILABILITY_DAYS: Final[int] = 1
 MAX_AVAILABILITY_DAYS: Final[int] = 14
 
+# How many still-free times a "that time is gone" error names. Enough for
+# the agent to offer a choice out loud without reading a whole day's list
+# to someone.
+ALTERNATIVES_IN_ERROR: Final[int] = 5
+
 # One calendar day, added to a `date` rather than to an aware `datetime`:
 # local midnight plus 24 hours is 23:00 or 01:00 on a DST-transition day,
 # so every local day boundary here is built by combining the *next date*
@@ -218,6 +223,7 @@ def offerable_slots_for_date(
     local_date: date_type,
     service_entry: dict[str, Any],
     zone: ZoneInfo,
+    exclude_appointment_id: str | None = None,
 ) -> list[dict[str, str]]:
     """Freshly compute the slots one clinic can offer on one local date.
 
@@ -237,6 +243,13 @@ def offerable_slots_for_date(
         service_entry: A normalised entry from `resolve_service` -- its
             `duration_minutes` is what decides whether a start fits.
         zone: The clinic's timezone, from `clinic_timezone`.
+        exclude_appointment_id: An appointment that must not block a slot,
+            for a *move*. `reschedule_appointment` asks whether a new time
+            is offerable while the appointment being moved still sits in
+            the table at its old time; without this, an appointment
+            overlapping its own new time would refuse its own reschedule
+            -- and any move within one service length would. Left `None`
+            by every read, where nothing is being moved.
 
     Returns:
         The same slot dicts `check_availability` returns, for that one day,
@@ -262,6 +275,7 @@ def offerable_slots_for_date(
         clinic_id,
         _local_midnight(local_date, zone),
         _local_midnight(local_date + _ONE_DAY, zone),
+        exclude_appointment_id=exclude_appointment_id,
     )
     return _compute_slots(
         intervals=plan.intervals,
@@ -591,7 +605,10 @@ def _positive_int(value: Any, field: str, clinic_id: str) -> int:
 
 
 def _booked_spans(
-    clinic_id: str, window_start: datetime, window_end: datetime
+    clinic_id: str,
+    window_start: datetime,
+    window_end: datetime,
+    exclude_appointment_id: str | None = None,
 ) -> list[tuple[datetime, datetime]]:
     """The `(start, end)` spans already occupied in one clinic's time window.
 
@@ -608,6 +625,11 @@ def _booked_spans(
     Statuses are filtered here rather than by a DynamoDB `FilterExpression`
     -- one clinic-day is a handful of items, and keeping the rule in
     `ACTIVE_APPOINTMENT_STATUSES` means adding a status stays one edit.
+
+    `exclude_appointment_id` drops one appointment from the answer, which
+    is what lets a reschedule ask about a time its own current booking
+    overlaps. It is dropped here, where an item still has its id, rather
+    than by the caller, which only ever sees anonymous spans.
     """
     # Lazy, mirroring `dynamo._dynamodb_resource`: importing this module
     # must not require the AWS SDK, so the interval logic stays testable
@@ -624,6 +646,12 @@ def _booked_spans(
     while True:
         response = table.query(**query)
         for item in response.get("Items", []):
+            if (
+                exclude_appointment_id is not None
+                and item.get(AppointmentAttrs.APPOINTMENT_ID)
+                == exclude_appointment_id
+            ):
+                continue
             span = _appointment_span(item)
             if span is not None:
                 spans.append(span)
@@ -738,3 +766,66 @@ def _overlaps(
     if booked_end <= booked_start:
         return candidate_start <= booked_start < candidate_end
     return candidate_start < booked_end and booked_start < candidate_end
+
+
+# --------------------------------------------------------------------------
+# Explaining a refusal
+# --------------------------------------------------------------------------
+
+
+def unavailable_message(
+    requested_start: str,
+    zone: ZoneInfo,
+    slots: list[dict[str, str]],
+    clinic: dict[str, Any],
+    action: str = "book",
+) -> str:
+    """Explain a refused time in terms the agent can say to the patient.
+
+    Shared by `book_appointment` and `reschedule_appointment`: both refuse a
+    time against a freshly computed `offerable_slots_for_date`, so both owe
+    the model the same recovery. It lives here, beside the rule that
+    produced the refusal, rather than in either write -- a second copy would
+    drift the moment one of them changed its wording.
+
+    Names the alternatives rather than only the refusal: the model calling
+    this has just been told "no" about a time the patient chose, and
+    without them its only recovery is another availability round trip -- a
+    pause the patient hears. Mirrors `resolve_service`, which lists the
+    clinic's services when it rejects one.
+
+    Deliberately does not say *why* the time is unavailable. Off-grid,
+    too-late-in-the-day, closed, and already-taken would each need the
+    composition rule re-walked to distinguish, which is exactly what a write
+    must not do -- and the patient's next step is the same in every case.
+
+    Args:
+        requested_start: The refused start, in `ISO8601_FORMAT`.
+        zone: The clinic's timezone, for rendering the refused time back
+            into the words the patient used.
+        slots: What *is* offerable that day, from
+            `offerable_slots_for_date`.
+        clinic: The clinic item, for its name.
+        action: The verb phrase for what was refused -- ``book`` for a new
+            appointment, ``move that appointment to`` for a reschedule.
+
+    Returns:
+        One sentence for the model to work from. Never a patient-facing
+        script: the phrasing stays the agent's job.
+    """
+    local = from_iso8601(requested_start).astimezone(zone)
+    when = f"{local.strftime(LOCAL_TIME_FORMAT)} on {local.strftime(DATE_FORMAT)}"
+    clinic_name = clinic.get(ClinicAttrs.NAME) or "This clinic"
+    if not slots:
+        return (
+            f"{clinic_name} cannot {action} {when}, and has nothing else free "
+            "that day for this service. Offer another day."
+        )
+    alternatives = ", ".join(
+        slot["local_start"] for slot in slots[:ALTERNATIVES_IN_ERROR]
+    )
+    more = "" if len(slots) <= ALTERNATIVES_IN_ERROR else ", and others"
+    return (
+        f"{clinic_name} cannot {action} {when}; that time is no longer "
+        f"available. Still free that day: {alternatives}{more}."
+    )

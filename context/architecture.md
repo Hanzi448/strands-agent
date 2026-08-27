@@ -86,7 +86,10 @@ EventBridge, Bedrock, and SES are all pay-per-use managed services.
       checks, the dashboard day view, and the daily background scan
       are all "this clinic, this time range".
     - `by-patient` (`clinic_patient` / `starts_at`) — the caller's
-      own appointments, time-ordered, for reschedule and cancel.
+      own appointments, time-ordered, for reschedule and cancel. It is
+      also the ownership check: a tool reaches an appointment only
+      through the caller's own partition, never by fetching an
+      `appointment_id` by key.
       `clinic_patient` is a composite `{clinic_id}#{patient_id}`
       attribute written by the tool layer, so the index key is itself
       clinic-scoped (see Invariants #1); a `patient_id`-only index
@@ -225,7 +228,12 @@ EventBridge, Bedrock, and SES are all pay-per-use managed services.
       `agent` or `staff` — the log's whole purpose is showing which
       moves the agent made unprompted, so it cannot be inferred later.
       `reason` is free text, like an escalation's, and has no machine
-      reader.
+      reader. **A cancellation writes an entry here too, with `to` set
+      to null** — a cancel is a move to nowhere. `status` alone records
+      that the appointment was called off but not who did it or why,
+      and those two are exactly what the action log exists to show; a
+      separate cancellation attribute would split the log into two
+      lists to read.
     - `reminders` — `{"at", "channel", "outcome"}`. `at` is when it was
       sent, `channel` is `email` (the only one in scope — SES),
       `outcome` is `sent` or `failed`. `outcome` exists because "we
@@ -235,7 +243,9 @@ EventBridge, Bedrock, and SES are all pay-per-use managed services.
       retry counts. No screen in `ui-context.md` reads them, and they
       would put a copy of the patient's contact details on every
       appointment item.
-    - The nested key names land in `backend/tools/schema.py` with
+    - The nested key names are in `backend/tools/schema.py` as
+      `RescheduleEntry` and `ReminderEntry`, with `RescheduleActor` for
+      the `agent`/`staff` vocabulary — landed with
       `reschedule_appointment`, the first tool to write one.
   - Tables are destroyed with the stack in non-`prod` environments and
     retained (with point-in-time recovery and deletion protection) in
