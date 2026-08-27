@@ -220,7 +220,6 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 
-context
 CLAUDE.md
 
 # Node / frontend (this repo has a Vite+React frontend; the base
