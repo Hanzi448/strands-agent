@@ -43,11 +43,15 @@ Python 3.12+ (`context/code-standards.md`), and the CDK CLI:
 
 ```bash
 cd backend/infra
-python -m venv .venv
+py -3.12 -m venv .venv        # Windows;  python3.12 -m venv .venv on macOS/Linux
 .venv/Scripts/activate        # Windows;  source .venv/bin/activate on macOS/Linux
 pip install -r requirements.txt
 npm install -g aws-cdk        # or use npx aws-cdk@2 below
 ```
+
+Create the venv with an explicit `py -3.12` / `python3.12`, not a bare
+`python` -- bare `python` may resolve to an older or unrelated
+interpreter.
 
 ## Commands
 

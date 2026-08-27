@@ -103,10 +103,6 @@ Update this file after every meaningful implementation change.
   spec, listed only for completeness. Leaning (a) as the smallest
   change from working sample code, but this needs an explicit
   decision and an `architecture.md` update, not a silent default.
-- **Local Python is 3.11, `code-standards.md` requires 3.12+.** The CDK
-  app synthesises fine on 3.11, so this did not block the CDK skeleton,
-  but Nova Sonic / BidiAgent genuinely require 3.12+. Install 3.12
-  before the agent work starts (Next Up #3), not at the point it fails.
 
 ## Architecture Decisions
 
@@ -174,6 +170,15 @@ Update this file after every meaningful implementation change.
   parts (audio worklet, presigned WebSocket, `useVoiceAgent` hook)
   carry over; the presentational components mostly do not. Worth
   budgeting for when item 4 comes up.
+- **Python 3.12.10 installed** (`winget install Python.Python.3.12
+  --scope user`), resolving the earlier 3.11-vs-3.12 gap ahead of the
+  Nova Sonic / BidiAgent work. `backend/infra/.venv` was rebuilt on it
+  and `cdk synth` re-verified. Caveat: bare `python` on this machine
+  resolves to an unrelated `hermes-agent` venv running 3.11, and the
+  installer put 3.12 ahead of 3.11 only in the *persisted* user PATH —
+  so use **`py -3.12`** (or the project venv) when a specific
+  interpreter matters, rather than trusting `python`. The `py` launcher
+  now defaults to 3.12.
 - **CDK CLI is not installed globally; `npx aws-cdk@2` was used** to
   verify `synth`/`list`. On Windows the CLI spawns the app through
   `cmd.exe`, which rejects a forward-slash venv path — the app must be
