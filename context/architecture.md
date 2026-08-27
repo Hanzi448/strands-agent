@@ -20,7 +20,7 @@
 | Frontend                | Vite + React + TypeScript + Tailwind + shadcn/ui         | Voice UI (forked/adapted from AWS's `sample-nova-sonic-websocket-agentcore`) + staff dashboard |
 | Frontend Hosting        | Amazon S3 + CloudFront                                    | Static SPA hosting, served over HTTPS                            |
 | Infrastructure as Code  | AWS CDK (Python)                                          | All AWS resources defined and deployed as code                   |
-| Region                  | `us-east-1` (default — confirm before first deploy; Nova Sonic is also available in us-west-2, eu-north-1, ap-northeast-1) | Single region for all resources |
+| Region                  | `us-east-1` (**confirmed**) | Single region for all resources. Chosen over the three other Nova Sonic regions (us-west-2, eu-north-1, ap-northeast-1) for Bedrock/AgentCore feature parity: the highest-risk dependency in this build is an experimental voice stack, and a missing capability found late costs more than the added round-trip latency of a browser demo |
 
 Everything in this stack is serverless/managed — no EC2 instances or
 containers to operate. AgentCore Runtime, Lambda, DynamoDB,
@@ -160,6 +160,21 @@ EventBridge, Bedrock, and SES are all pay-per-use managed services.
       break or closing time) and overlaps no existing appointment in
       `ACTIVE_APPOINTMENT_STATUSES`. `duration_minutes` therefore need
       not be a multiple of `slot_minutes`.
+    - **Multi-day look-ahead**: `check_availability` takes a bounded
+      `days` argument (default `1`, maximum `14`) and applies the rule
+      above to each consecutive local date from `date` forward, so
+      "when are you next free?" is one tool call rather than one per
+      day. This is a voice latency decision, not a convenience: every
+      extra tool round trip is a pause the patient hears, and a clinic
+      open `tue`–`sat` would otherwise need up to seven of them to
+      answer one ordinary question. Each returned slot carries its own
+      local date; `days=1` is exactly the single-day behaviour, so the
+      look-ahead is additive. The cap is what stops a model that
+      guessed "365" from issuing a year of queries in a live session.
+      It stays one tool rather than a second `find_next_available`,
+      because a second tool would re-walk the same hours/closures/
+      overlap rule and put the booking system's core logic in two
+      places.
     - The attribute *names* are fixed in `backend/tools/schema.py`
       (`ClinicAttrs`); the nested key names above land there as constants
       with the first tool that reads them, per `code-standards.md`
@@ -177,6 +192,29 @@ EventBridge, Bedrock, and SES are all pay-per-use managed services.
   - The autonomous-action log the staff dashboard shows is derived from
     appointment reminder/reschedule history plus `Escalations` — there
     is no separate actions table.
+  - **Appointment history entry shapes.** Both lists are append-only and
+    both are read by the dashboard's action log, so their entries are
+    fixed here rather than by whichever tool happens to write one first.
+    Every field is one the writing tool already holds; nothing requires
+    a second lookup to render.
+    - `reschedule_history` — `{"at", "from", "to", "actor", "reason"}`.
+      `at` is when the move happened, `from`/`to` are the old and new
+      `starts_at` (all three in the one UTC encoding). `actor` is
+      `agent` or `staff` — the log's whole purpose is showing which
+      moves the agent made unprompted, so it cannot be inferred later.
+      `reason` is free text, like an escalation's, and has no machine
+      reader.
+    - `reminders` — `{"at", "channel", "outcome"}`. `at` is when it was
+      sent, `channel` is `email` (the only one in scope — SES),
+      `outcome` is `sent` or `failed`. `outcome` exists because "we
+      reminded them" and "we tried and SES rejected it" are different
+      facts for staff deciding whether to phone a patient.
+    - Deliberately excluded: SES message ids, templates, recipients, and
+      retry counts. No screen in `ui-context.md` reads them, and they
+      would put a copy of the patient's contact details on every
+      appointment item.
+    - The nested key names land in `backend/tools/schema.py` with
+      `reschedule_appointment`, the first tool to write one.
   - Tables are destroyed with the stack in non-`prod` environments and
     retained (with point-in-time recovery and deletion protection) in
     `prod`.
@@ -190,10 +228,27 @@ EventBridge, Bedrock, and SES are all pay-per-use managed services.
 
 ## Auth and Access Model
 
-- **Patients**: no authentication. The voice endpoint is publicly
-  reachable for the demo; the active clinic context is selected at
-  session start (demo picker: dental or cosmetic) rather than via
-  patient login.
+- **Patients**: no patient authentication — no accounts, no login, no
+  credential the patient ever sees or supplies. The voice endpoint is
+  publicly reachable for the demo; the active clinic context is
+  selected at session start (demo picker: dental or cosmetic) rather
+  than via patient login.
+  - **How that reaches AgentCore**: via a **Cognito identity pool with
+    unauthenticated (guest) identities enabled**. AgentCore's WebSocket
+    is SigV4-signed, so "no auth" cannot mean "no AWS credential" — the
+    browser needs *some* credential to presign the connection. A guest
+    identity supplies exactly that: short-lived, role-scoped AWS
+    credentials issued to anyone, with no user record created. This is
+    also the path the vendored AWS sample already implements
+    (`frontend/src/aws-credentials.ts`, `websocket-presigned.ts`), so
+    it is the option that leaves working sample code working.
+  - The guest IAM role is scoped to invoking the one AgentCore runtime
+    and nothing else — it is handed to every visitor, so it must grant
+    no DynamoDB, S3, or Bedrock access directly. All data access stays
+    behind the agent, which is where `clinic_id` scoping is enforced.
+  - The identity pool is **separate from the staff user pool**. Staff
+    authentication is unrelated and must not share a credential path
+    with anonymous visitors.
 - **Staff**: authenticate via Amazon Cognito. One user pool, one
   demo account seeded per clinic. Dashboard API routes require a
   valid Cognito-issued token.
@@ -219,7 +274,12 @@ EventBridge, Bedrock, and SES are all pay-per-use managed services.
    DynamoDB) are stored.
 5. Staff-facing API routes require Cognito authentication and are
    scoped to the authenticated staff member's clinic. The
-   patient-facing voice endpoint requires no authentication.
+   patient-facing voice endpoint requires no *patient* authentication:
+   the browser presigns it with a Cognito **guest** identity whose IAM
+   role may invoke the agent runtime and reach nothing else. No IAM
+   role handed to an anonymous visitor may touch DynamoDB, S3, or
+   Bedrock directly — every data path stays behind the agent, where
+   `clinic_id` scoping is enforced.
 6. The agent may only take an autonomous action (reminder, auto-
    reschedule) within rules defined in `backend/tools/` — anything
    outside those rules must go through `escalation_agent` instead of

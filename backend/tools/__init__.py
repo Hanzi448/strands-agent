@@ -10,6 +10,8 @@ Modules:
     validation: boundary checks every tool runs before touching data.
     dynamo: table handles, resolved from the CDK-provided environment.
     errors: the exception vocabulary tools raise.
+    scheduling: availability -- and the only place clinic-local wall-clock
+        time is converted to and from the UTC everything else stores.
 
 Nothing here imports Strands or AgentCore. The `@tool`-decorated agent
 surface lives in `backend/agents/`; this layer stays callable from a

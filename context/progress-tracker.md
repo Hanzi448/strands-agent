@@ -7,20 +7,25 @@ Update this file after every meaningful implementation change.
 - Phase 2: business logic. The AWS sample is vendored as reference
   code, `backend/infra/` synthesises with the four DynamoDB tables
   defined (the other four stacks are still empty), and `backend/tools/`
-  now exists as a tested foundation — item schema, status vocabularies,
-  validation, table handles — with no tool functions on it yet. The
-  clinic availability config shape is specified in `architecture.md`.
-  `frontend/`, `backend/agents/`, `backend/lambda/`, and `seed/` do not
-  exist yet.
+  has its foundation plus its **first tool**: `check_availability`
+  reads a clinic's config and its booked appointments and returns
+  offerable slots. The remaining scheduling tools (book, reschedule,
+  cancel) are still to come. `frontend/`, `backend/agents/`,
+  `backend/lambda/`, and `seed/` do not exist yet.
 
 ## Current Goal
 
-- Build the tool functions on the `backend/tools/` foundation, one at a
-  time, starting with scheduling. The spec decision that blocked
-  availability — the `Clinics` config shape — is now made and written
-  into `architecture.md`, so `check_availability` is unblocked and is
-  the next item. The agents, the KB bucket, the frontend adapted from
-  the vendored AWS Nova Sonic sample, and the seed scripts follow.
+- Continue the tool functions one at a time. Four open questions were
+  answered by the user on 2026-08-28 and are now written into
+  `architecture.md` (see Open Questions): the `days` look-ahead, the
+  appointment history entry shapes, Cognito guest identities for the
+  voice endpoint, and `us-east-1`. None of them blocks anything now.
+  Next is the small `days` look-ahead on `check_availability`, which
+  finishes the availability *read* surface, then `book_appointment` —
+  the first *write*, and the one that needs patient lookup-or-create
+  by phone. The remaining writes, the agents, the KB bucket, the
+  frontend adapted from the vendored AWS Nova Sonic sample, and the
+  seed scripts follow.
 
 ## Completed
 
@@ -121,6 +126,40 @@ Update this file after every meaningful implementation change.
   `duration_minutes`) land as constants with the first tool that reads
   them. Verified: `pytest` from `backend/` — 66 passed.
 
+- **`check_availability` in `backend/tools/scheduling.py`**
+  (Next Up #1). The first tool function, and the first code that reads
+  DynamoDB. Given a `clinic_id`, a local `date`, and a `service`, it
+  returns the start times that clinic can offer: the clinic's `hours`
+  for that weekday, minus whole-day `closures`, gridded by
+  `slot_minutes`, filtered to candidates whose whole
+  `duration_minutes` fits inside one opening interval, minus anything
+  overlapping an appointment in `ACTIVE_APPOINTMENT_STATUSES`. Read
+  only — nothing is written, and `book_appointment` will re-check the
+  slot it is finally given rather than trusting a list returned here.
+  Landed with it: the nested config key names `schema.py` had deferred
+  (`HoursInterval`, `ClosureAttrs`, `ServiceAttrs`, `WEEKDAY_KEYS`,
+  `weekday_key`), the `DATE_FORMAT`/`LOCAL_TIME_FORMAT` encodings,
+  `from_iso8601` (the counterpart to `to_iso8601`, for the arithmetic
+  this tool has to do on stored times), and `validation.require_date`.
+  The response carries both `starts_at`/`ends_at` in stored UTC and
+  `local_start`/`local_end` as `HH:MM`, because the model must *say*
+  "nine o'clock" and must not do timezone arithmetic itself; it also
+  distinguishes closed-for-a-holiday (`closure_label`) from
+  closed-that-weekday from open-but-fully-booked, which are three
+  different things to tell a patient.
+  Verified: `pytest` from `backend/` — **125 passed** (66 before, 59
+  new). The suite drives the real code path with fake table objects
+  (no credentials): the two demo clinics from `architecture.md` answer
+  the same question differently, a 30-minute service is refused at
+  12:45 against a 13:00 lunch break, overlap is half-open at both
+  ends, cancelled/completed/no-show free their slot while an
+  *unrecognised* status does not, DST is checked by running the same
+  clinic in July and January (09:00 local = 08:00Z then 09:00Z), the
+  query window is asserted to be the clinic's local midnight-to-
+  midnight expressed in UTC, and every malformed-config case fails as
+  `ConfigurationError` rather than as wrong slots. Also eyeballed
+  end to end against the seeded demo configs.
+
 ## In Progress
 
 - None.
@@ -133,15 +172,20 @@ forbids in one step. Its foundation and the spec decision that blocked
 the first tool are done (see Completed); the remaining tools are split
 out below, one per unit.
 
-1. `check_availability` in `backend/tools/scheduling.py` — read-only,
-   queries the `by-start-time` index, subtracts appointments in
-   `ACTIVE_APPOINTMENT_STATUSES` from the clinic's configured hours.
-   Now unblocked: `architecture.md` -> Storage Model specifies the
-   config shape and the slot-composition rule exactly. This is the tool
-   that lands the nested config key names in `schema.py` and the
-   `zoneinfo` local/UTC conversion.
+1. **`days` look-ahead on `check_availability`** — a small unit, and
+   the last change to the availability *read* surface before the
+   agents depend on it. Bounded `days: int = 1` (max 14), each slot
+   carrying its own local date; spec in `architecture.md` -> Storage
+   Model. Placed before `book_appointment` because it touches the
+   function just written, while its tests and reasoning are still
+   loaded — and because settling the read surface first means the
+   Scheduling sub-agent is written against its final shape.
 2. `book_appointment` — plus the patient lookup-or-create by phone
    (the `by-phone` index) that booking needs to resolve a caller.
+   Reuses `scheduling.get_clinic` / `resolve_service` and re-checks the
+   requested slot against `check_availability`'s rule rather than
+   restating it: a slot offered to a patient can be taken while they
+   are still deciding, so the conflict check belongs on the write.
 3. `reschedule_appointment` and `cancel_appointment` — the two writes
    that share the reschedule-history append.
 4. Escalation tools — create, list open, mark resolved.
@@ -175,17 +219,38 @@ out below, one per unit.
   case; (c) per-service `duration_minutes`; (d) per-clinic
   `slot_minutes`. See Completed.
 
-- **What does one entry in an appointment's `reminders` /
-  `reschedule_history` list contain?** Deferred, not blocking: the
-  attribute names exist, and the tools that write them (reminder
-  dispatch, auto-reschedule) are the ones that decide the entry shape.
-  Worth settling before the dashboard reads them, since
-  `architecture.md` -> Storage Model derives the autonomous-action log
-  from exactly these two lists plus `Escalations`.
+- ~~**Does the patient flow need a "next available appointment"
+  search?**~~ **Resolved** — yes, as a bounded `days` look-ahead on
+  `check_availability` itself (default `1`, max `14`), specified in
+  `architecture.md` -> Storage Model. Rejected: a separate
+  `find_next_available`, which would re-walk the same hours/closures/
+  overlap rule and put the booking system's core logic in two places.
+  The reason is voice latency — each extra tool round trip is a pause
+  the patient hears, and a clinic open `tue`–`sat` would otherwise
+  need up to seven to answer "when are you next free?". Additive:
+  `days=1` is the behaviour already built and tested. Now Next Up #1.
 
-- **AWS region**: defaulting to `us-east-1` in `architecture.md` —
-  confirm before first deploy (Nova Sonic also available in
-  us-west-2, eu-north-1, ap-northeast-1).
+- ~~**What does one entry in an appointment's `reminders` /
+  `reschedule_history` list contain?**~~ **Resolved** — specified in
+  `architecture.md` -> Storage Model ("Appointment history entry
+  shapes"): `{at, from, to, actor, reason}` and
+  `{at, channel, outcome}`. `actor` is `agent`/`staff` because the
+  dashboard's whole point is showing which moves the agent made
+  unprompted, and that cannot be inferred after the fact; `outcome`
+  is `sent`/`failed` because "we reminded them" and "SES rejected it"
+  are different facts for staff deciding whether to phone. SES message
+  ids, templates, recipients and retry counts were deliberately
+  excluded — no screen in `ui-context.md` reads them, and they would
+  copy the patient's contact details onto every appointment item.
+  `schema.py` synced; the nested key names land there with
+  `reschedule_appointment`.
+
+- ~~**AWS region**~~ **Resolved** — `us-east-1`, confirmed in
+  `architecture.md` -> Stack. Chosen over the three other Nova Sonic
+  regions for Bedrock/AgentCore feature parity: the riskiest
+  dependency here is an experimental voice stack, and a capability
+  found missing late costs more than the extra round-trip latency of
+  a browser demo.
 - **Project name**: using "ClinicPilot" as a placeholder throughout
   — rename before final submission if a better name comes up.
 - **Nova Sonic/BidiAgent stability**: marked experimental by AWS
@@ -197,24 +262,23 @@ out below, one per unit.
   address, verified manually in the SES console before the demo —
   not automated in CDK since it's a one-time manual verification
   step.
-- **How does an unauthenticated patient reach the voice endpoint?**
-  Surfaced by vendoring the sample. `architecture.md` → Auth and
-  Access Model says patients are unauthenticated and Cognito is
-  staff-only, but the sample connects to AgentCore via a
-  **SigV4-presigned WebSocket** built from Cognito **identity-pool**
-  credentials (`frontend/src/aws-credentials.ts`,
-  `websocket-presigned.ts`). SigV4 requires *some* AWS credential, so
-  "no auth" cannot mean "no credential". Options to decide before
-  item 4 (voice wiring): (a) Cognito identity pool with
-  **unauthenticated/guest** identities enabled — keeps the sample's
-  presigning path intact, patients never see a login, still no
-  patient accounts; (b) put our own Lambda/API Gateway WebSocket in
-  front and let the backend hold the credentials
-  (`voice_bridge.py`, already contemplated in `architecture.md` →
-  System Boundaries); (c) require patient login — contradicts the
-  spec, listed only for completeness. Leaning (a) as the smallest
-  change from working sample code, but this needs an explicit
-  decision and an `architecture.md` update, not a silent default.
+- ~~**How does an unauthenticated patient reach the voice endpoint?**~~
+  **Resolved** — a **Cognito identity pool with unauthenticated
+  (guest) identities enabled**, written into `architecture.md` → Auth
+  and Access Model and into Invariants #5. AgentCore's WebSocket is
+  SigV4-signed, so "no auth" could never mean "no AWS credential"; a
+  guest identity issues short-lived role-scoped credentials with no
+  user record, which is precisely the gap. It also keeps the vendored
+  sample's presigning path (`aws-credentials.ts`,
+  `websocket-presigned.ts`) working rather than rewriting the
+  connection layer during the riskiest week. Rejected: our own
+  API Gateway WebSocket bridge (a new deploy surface, and it discards
+  working sample code) and patient login (contradicts
+  `project-overview.md`). **Carries a build constraint**: the guest
+  IAM role is handed to every visitor, so it may invoke the agent
+  runtime and nothing else — no direct DynamoDB, S3, or Bedrock
+  access on that role, ever. The identity pool stays separate from
+  the staff user pool.
 
 ## Architecture Decisions
 
@@ -248,6 +312,19 @@ out below, one per unit.
   initial fork as reference code, not final code"). `architecture.md`
   → System Boundaries does not list `vendor/`; added here as the
   location for pinned third-party reference code.
+- **Patients reach the voice endpoint with a Cognito *guest* identity,
+  not with no credential at all.** "Unauthenticated patient" is a
+  product statement, not a network one: AgentCore's WebSocket is
+  SigV4-signed, so something must sign it. An identity pool's
+  unauthenticated identities issue short-lived role-scoped AWS
+  credentials to any visitor with no user record created, which is the
+  only option that satisfies both "patients never log in" and "the
+  socket is signed" — and it is what the vendored sample already does.
+  The lasting constraint: that guest role is handed to everyone who
+  opens the page, so it may invoke the agent runtime and nothing else.
+  Any DynamoDB/S3/Bedrock reach on it would be a cross-tenant hole no
+  amount of `clinic_id` discipline in the tool layer could close.
+
 - **Tenant scoping is enforced in the index keys, not by convention** —
   the appointments-by-patient GSI is keyed on a composite
   `clinic_patient` (`{clinic_id}#{patient_id}`) attribute rather than on
@@ -366,6 +443,50 @@ out below, one per unit.
   demo does not need. A clinic that closes early on a given day is
   representable as a change to `hours` if it is recurring.
 
+- **"Closed today", "closed for a holiday", and "open but fully
+  booked" are three distinguishable answers, not one empty list.**
+  `check_availability` returns `is_open` and `closure_label` alongside
+  `slots`, because a patient told "nothing available" when the clinic
+  is shut for a training day has been told something misleading, and
+  the model cannot recover the difference from an empty list. The
+  label is the clinic's own text; the tool returns data and never the
+  phrasing, which stays the agent's job.
+
+- **Slot arithmetic happens in UTC, on intervals converted once.**
+  `hours` are parsed as clinic-local wall clock, converted to UTC
+  immediately, and every comparison after that — grid stepping, fit,
+  overlap — is between absolute instants. Stepping a `timedelta`
+  across an aware *local* datetime advances the wall clock, not the
+  elapsed time, so on a DST-transition day it would silently produce
+  slots an hour wide in one direction. The local `HH:MM` strings in
+  the response are rendered back at the very end, for speech only.
+
+- **A malformed clinic config raises `ConfigurationError`; it never
+  degrades to fewer slots.** Inverted or overlapping `hours`, a
+  non-positive `slot_minutes`, an unknown timezone — each fails loudly
+  rather than being skipped. This is the one function the whole
+  booking flow trusts, and a config fault that quietly produced *some*
+  plausible slots would surface as a double-booking days later. The
+  one exception is a malformed `closures` entry, which is ignored:
+  there, failing loudly would take a clinic's entire calendar offline
+  over one bad row.
+
+- **Availability is conservative when data is ambiguous.** An
+  appointment with an unrecognised status, or missing its `ends_at`,
+  still blocks the slot containing it. Offering a slot that is
+  actually taken produces a double-booked patient in a chair;
+  withholding a free one produces a slightly worse answer. Those are
+  not symmetric, so the tie is broken deliberately rather than by
+  whichever branch fell out of the code.
+
+- **Services are matched by id *or* name, ids first.** The value
+  arrives from speech, so a model that heard "cleaning" may send
+  either the id or the spoken name; requiring the id would push a
+  lookup table into the agent prompt, which is exactly the per-clinic
+  behavior that is supposed to live in the clinic's own item. Ids are
+  matched before names so one entry's name can never shadow another
+  entry's id.
+
 - **Phone numbers are normalised at the boundary, not at read time.**
   The `by-phone` index is an equality match, so "555 123 4567" from
   speech and "+15551234567" from a seed script have to converge before
@@ -380,6 +501,27 @@ out below, one per unit.
   `backend/` — `backend/pytest.ini` sets `pythonpath = .` so `tools`
   imports as a package. Two venvs rather than one because the CDK app
   pulls `aws-cdk-lib` and the tool layer must not.
+
+- **`tzdata` is now a runtime dependency** (`backend/requirements.txt`).
+  `zoneinfo` reads the operating system's IANA database, and Windows
+  does not have one — without the package, `ZoneInfo("Europe/London")`
+  raises and *every* clinic looks misconfigured locally while working
+  fine once deployed. Cheap insurance, and it also pins the tz data
+  for Lambda rather than inheriting whatever the runtime image ships.
+
+- **DynamoDB numbers come back as `Decimal`.** `slot_minutes` and
+  `duration_minutes` are read through a coercion helper, not used
+  directly: `timedelta(minutes=Decimal("15"))` raises `TypeError`.
+  The test fixtures deliberately use `Decimal` for exactly this
+  reason, so the suite would catch it if the coercion were dropped.
+
+- **The scheduling tests fake the two table accessors, not boto3.**
+  `tools.scheduling` touches DynamoDB only through `clinics_table()`
+  and `appointments_table()`, so substituting those exercises the real
+  function end to end with no credentials, no moto, and no network —
+  including the pagination loop and the key-condition construction,
+  which are asserted by reading the recorded `KeyConditionExpression`
+  back through boto3's own `get_expression()`.
 
 - **boto3 is imported lazily inside `dynamo.py`**, not at module top.
   It keeps `tools.schema` and `tools.validation` pure-stdlib and

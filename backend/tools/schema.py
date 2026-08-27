@@ -12,9 +12,10 @@ silently absent field rather than an error.
 The value *shapes* of the nested clinic fields (`hours`, `closures`,
 `services`) are specified in `architecture.md` -> Storage Model ("Clinic
 availability config"), not here. This module fixes names, vocabularies,
-and the key/timestamp encodings the tables' sort keys depend on; the
-nested key names inside those values land here as constants with the
-first tool that reads them (`check_availability`).
+and the key/timestamp encodings the tables' sort keys depend on -- now
+including the key names *inside* those nested values (`HoursInterval`,
+`ClosureAttrs`, `ServiceAttrs`, `WEEKDAY_KEYS`), landed by
+`tools.scheduling.check_availability`, the first tool that reads them.
 
 The key attribute and index names below must match
 `backend/infra/data_stack.py` exactly;
@@ -25,7 +26,7 @@ duplication cannot drift unnoticed.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from enum import StrEnum
 from typing import Final
 
@@ -158,6 +159,59 @@ class ClinicAttrs:
     UPDATED_AT: Final[str] = "updated_at"
 
 
+class HoursInterval:
+    """Keys of one opening interval inside a clinic's `hours` weekday list.
+
+    `{"open": "HH:MM", "close": "HH:MM"}`, 24-hour clinic-local wall-clock
+    time. A weekday maps to a *list* of these, so a lunch break or a split
+    shift is expressible; an empty list means closed that day.
+    """
+
+    OPEN: Final[str] = "open"
+    CLOSE: Final[str] = "close"
+
+
+class ClosureAttrs:
+    """Keys of one entry in a clinic's `closures` list.
+
+    `{"date": "YYYY-MM-DD", "label": str}`. Whole-day only: a matching date
+    removes the day regardless of `hours` (`architecture.md` -> Storage
+    Model). `label` is shown to a human, never matched on.
+    """
+
+    DATE: Final[str] = "date"
+    LABEL: Final[str] = "label"
+
+
+class ServiceAttrs:
+    """Keys of one entry in a clinic's `services` list.
+
+    `{"id": str, "name": str, "duration_minutes": int}`. `id` is the stable
+    machine key written to an appointment's `service` attribute and never
+    spoken; `name` is what the agent says and hears. `duration_minutes` is
+    what sets an appointment's `ends_at`, so it -- not `slot_minutes` --
+    decides how much of an opening interval a booking consumes.
+    """
+
+    ID: Final[str] = "id"
+    NAME: Final[str] = "name"
+    DURATION_MINUTES: Final[str] = "duration_minutes"
+
+
+# Keys of the `hours` map, ordered to match `datetime.date.weekday()`
+# (Monday is 0) so `weekday_key` is an index rather than a lookup table.
+# All seven are always present on a clinic item.
+WEEKDAY_KEYS: Final[tuple[str, ...]] = (
+    "mon",
+    "tue",
+    "wed",
+    "thu",
+    "fri",
+    "sat",
+    "sun",
+)
+
+
 class PatientAttrs:
     """`Patients` item: the minimal demo profile.
 
@@ -185,8 +239,10 @@ class AppointmentAttrs:
     `REMINDERS` and `RESCHEDULE_HISTORY` are append-only lists. They exist
     because `architecture.md` -> Storage Model derives the dashboard's
     autonomous-action log from them plus `Escalations` rather than adding
-    a fifth table. What one entry contains is decided by the tools that
-    write them (reminder dispatch, auto-reschedule), not here.
+    a fifth table. What one entry contains is specified there too
+    ("Appointment history entry shapes"): `{at, from, to, actor, reason}`
+    and `{at, channel, outcome}`. Those nested key names land here as
+    constants with `reschedule_appointment`, the first tool to write one.
     """
 
     CLINIC_ID: Final[str] = CLINIC_ID
@@ -243,6 +299,16 @@ ESCALATION_ID_PREFIX: Final[str] = "esc"
 # would silently order items wrongly. Every timestamp this layer writes
 # goes through `to_iso8601`.
 ISO8601_FORMAT: Final[str] = "%Y-%m-%dT%H:%M:%SZ"
+
+# `2026-08-27`: a calendar date with no time and no zone -- the `closures`
+# entries and the day a caller asks about. Distinct from `ISO8601_FORMAT`
+# because a date is not an instant: "the 27th" means the clinic's local
+# day, and only `tools.scheduling` turns it into UTC instants.
+DATE_FORMAT: Final[str] = "%Y-%m-%d"
+
+# `09:00`: clinic-local wall-clock time, used by `hours` and by the local
+# start/end a tool hands back for the agent to speak. Never stored.
+LOCAL_TIME_FORMAT: Final[str] = "%H:%M"
 
 
 def new_id(prefix: str) -> str:
@@ -306,6 +372,45 @@ def to_iso8601(value: datetime) -> str:
     return value.astimezone(timezone.utc).strftime(ISO8601_FORMAT)
 
 
+def from_iso8601(value: str) -> datetime:
+    """Read a stored timestamp back into an aware UTC datetime.
+
+    The inverse of `to_iso8601`, for the tools that have to do arithmetic
+    on stored times (does this appointment overlap that slot?) rather than
+    just compare them as sort keys.
+
+    Args:
+        value: A string written by `to_iso8601`.
+
+    Returns:
+        A timezone-aware datetime in UTC.
+
+    Raises:
+        ValidationError: If the string is not in `ISO8601_FORMAT`. Stored
+            values always are, so this is a corrupt-data signal, not a
+            caller-input one.
+    """
+    try:
+        parsed = datetime.strptime(value, ISO8601_FORMAT)
+    except (TypeError, ValueError) as exc:
+        raise ValidationError(
+            f"Timestamp must be in the form {ISO8601_FORMAT}; got {value!r}."
+        ) from exc
+    return parsed.replace(tzinfo=timezone.utc)
+
+
 def utc_now_iso() -> str:
     """The current UTC time in `ISO8601_FORMAT`, for `created_at`/`updated_at`."""
     return to_iso8601(datetime.now(timezone.utc))
+
+
+def weekday_key(value: date) -> str:
+    """The `hours` map key for a calendar date, e.g. ``"mon"``.
+
+    Args:
+        value: A clinic-local calendar date.
+
+    Returns:
+        One of `WEEKDAY_KEYS`.
+    """
+    return WEEKDAY_KEYS[value.weekday()]

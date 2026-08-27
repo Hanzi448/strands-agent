@@ -1,3 +1,7 @@
 # Runtime dependencies for the tool layer, agents, and Lambda handlers.
 # Strands / AgentCore packages are added when `backend/agents/` lands.
 boto3>=1.35
+# The IANA timezone database. `zoneinfo` reads the system copy where there
+# is one (Lambda, Linux containers); Windows has none, so a clinic's
+# `timezone` would look misconfigured during local development without it.
+tzdata>=2024.1

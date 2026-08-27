@@ -15,11 +15,11 @@ always the normalised string, never whatever the model transcribed.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from enum import StrEnum
 
 from .errors import ValidationError
-from .schema import CLINIC_ID, ISO8601_FORMAT, to_iso8601
+from .schema import CLINIC_ID, DATE_FORMAT, ISO8601_FORMAT, to_iso8601
 
 # DynamoDB caps an item at 400 KB. These bounds are far below that: they
 # exist to stop a mis-generated tool argument (a model pasting a whole
@@ -132,6 +132,44 @@ def require_timestamp(value: str | None, field: str) -> str:
             f"{datetime(2026, 1, 1).strftime(ISO8601_FORMAT)}; got {candidate!r}."
         ) from exc
     return to_iso8601(parsed)
+
+
+def require_date(value: str | None, field: str) -> date:
+    """Validate a calendar-date argument and return it as a `date`.
+
+    A date is deliberately not a timestamp: "the 27th" means the clinic's
+    local day, and only `tools.scheduling` may turn it into UTC instants
+    (`architecture.md` -> Storage Model). Returning a `date` rather than a
+    string is what stops a caller from accidentally comparing it against a
+    stored UTC value.
+
+    A full ISO-8601 timestamp is accepted and truncated to its date, since
+    a model asked for "a date" often produces one.
+
+    Args:
+        value: The candidate date, e.g. ``2026-08-27``.
+        field: Argument name, used in the error message.
+
+    Returns:
+        The parsed `datetime.date`.
+
+    Raises:
+        ValidationError: If it is missing, not a string, or unparseable.
+    """
+    if not isinstance(value, str) or not value.strip():
+        raise ValidationError(f"{field} is required and must be a non-empty string.")
+    candidate = value.strip()
+    try:
+        return datetime.strptime(candidate, DATE_FORMAT).date()
+    except ValueError:
+        pass
+    try:
+        return datetime.fromisoformat(candidate).date()
+    except ValueError as exc:
+        raise ValidationError(
+            f"{field} must be a calendar date in the form "
+            f"{datetime(2026, 1, 1).strftime(DATE_FORMAT)}; got {candidate!r}."
+        ) from exc
 
 
 def require_enum[E: StrEnum](value: str | E | None, enum_cls: type[E], field: str) -> E:
