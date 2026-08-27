@@ -8,18 +8,19 @@ Update this file after every meaningful implementation change.
   code, `backend/infra/` synthesises with the four DynamoDB tables
   defined (the other four stacks are still empty), and `backend/tools/`
   now exists as a tested foundation — item schema, status vocabularies,
-  validation, table handles — with no tool functions on it yet.
+  validation, table handles — with no tool functions on it yet. The
+  clinic availability config shape is specified in `architecture.md`.
   `frontend/`, `backend/agents/`, `backend/lambda/`, and `seed/` do not
   exist yet.
 
 ## Current Goal
 
 - Build the tool functions on the `backend/tools/` foundation, one at a
-  time, starting with scheduling. The first one (availability) is
-  blocked on a spec decision — the `Clinics` config shape — so that
-  decision is the next item, not the code. The agents, the KB bucket,
-  the frontend adapted from the vendored AWS Nova Sonic sample, and the
-  seed scripts follow.
+  time, starting with scheduling. The spec decision that blocked
+  availability — the `Clinics` config shape — is now made and written
+  into `architecture.md`, so `check_availability` is unblocked and is
+  the next item. The agents, the KB bucket, the frontend adapted from
+  the vendored AWS Nova Sonic sample, and the seed scripts follow.
 
 ## Completed
 
@@ -94,6 +95,32 @@ Update this file after every meaningful implementation change.
   not covered: it needs credentials and a live boto3 resource, so it
   is exercised by the first tool that queries.
 
+- **Clinic availability config shape fixed in `architecture.md`**
+  (Next Up #1 — a spec unit, no tool code). `architecture.md` ->
+  Storage Model now specifies the five `Clinics` attributes that
+  together decide whether a time is bookable, and states that nothing
+  outside a clinic's own item may be consulted to decide it:
+  `timezone` (IANA, the frame `hours`/`closures` are read in, while
+  every stored timestamp stays UTC); `hours` as a weekday -> **list of
+  `{open, close}` intervals** so a lunch break or split shift is
+  expressible; `closures` as whole-day `{date, label}` entries;
+  `services` as `{id, name, duration_minutes}` so a 60-minute consult
+  blocks a different span than a 15-minute check-up; and per-clinic
+  `slot_minutes`. The composition rule is written down too — candidate
+  starts on the `slot_minutes` grid from each interval's `open`, offered
+  only if the whole duration fits inside that same interval and overlaps
+  nothing in `ACTIVE_APPOINTMENT_STATUSES` — so `check_availability` has
+  no decision left to make. Concrete configs for the two demo clinics
+  are recorded there as the target for the seed scripts. Four decisions,
+  all confirmed with the user rather than defaulted
+  (`ai-workflow-rules.md` -> Handling Missing Requirements).
+  `schema.py` synced: `ClinicAttrs` gained `CLOSURES` and
+  `SLOT_MINUTES` (attribute *names* are this module's job), and the two
+  docstrings that called the shape an open question now point at the
+  spec. Nested key names (`open`, `close`, `date`, `id`,
+  `duration_minutes`) land as constants with the first tool that reads
+  them. Verified: `pytest` from `backend/` — 66 passed.
+
 ## In Progress
 
 - None.
@@ -102,63 +129,51 @@ Update this file after every meaningful implementation change.
 
 The old item 1 ("implement `backend/tools/`") bundled five unrelated
 tool families, which `ai-workflow-rules.md` -> When to Split Work
-forbids in one step. Its foundation is done (see Completed); the
-remaining tools are split out below, one per unit.
+forbids in one step. Its foundation and the spec decision that blocked
+the first tool are done (see Completed); the remaining tools are split
+out below, one per unit.
 
-1. **Spec step, not code: fix the `Clinics` config shape** in
-   `architecture.md` — opening hours per weekday, closures/holidays,
-   the service list with a duration per service, and slot granularity.
-   `backend/tools/schema.py` fixed the attribute *names* (`hours`,
-   `services`) but deliberately left the nested value shapes open,
-   because they are availability rules, and
-   `ai-workflow-rules.md` forbids inventing them inline. Availability,
-   booking, and the seed scripts all read them, so this is decided
-   once, first. See Open Questions.
-2. `check_availability` in `backend/tools/scheduling.py` — read-only,
+1. `check_availability` in `backend/tools/scheduling.py` — read-only,
    queries the `by-start-time` index, subtracts appointments in
    `ACTIVE_APPOINTMENT_STATUSES` from the clinic's configured hours.
-3. `book_appointment` — plus the patient lookup-or-create by phone
+   Now unblocked: `architecture.md` -> Storage Model specifies the
+   config shape and the slot-composition rule exactly. This is the tool
+   that lands the nested config key names in `schema.py` and the
+   `zoneinfo` local/UTC conversion.
+2. `book_appointment` — plus the patient lookup-or-create by phone
    (the `by-phone` index) that booking needs to resolve a caller.
-4. `reschedule_appointment` and `cancel_appointment` — the two writes
+3. `reschedule_appointment` and `cancel_appointment` — the two writes
    that share the reschedule-history append.
-5. Escalation tools — create, list open, mark resolved.
-6. Build the Orchestrator agent + Scheduling/FAQ/Escalation
+4. Escalation tools — create, list open, mark resolved.
+5. Build the Orchestrator agent + Scheduling/FAQ/Escalation
    sub-agents (Agent-as-Tool pattern), test locally with a text
    interface before wiring voice.
-7. Wire Nova Sonic + BidiAgent voice on top of the working
+6. Wire Nova Sonic + BidiAgent voice on top of the working
    text-agent logic.
-8. Deploy to AgentCore Runtime, verify voice session end-to-end.
-9. Add the Knowledge Base source S3 bucket to the data stack
+7. Deploy to AgentCore Runtime, verify voice session end-to-end.
+8. Add the Knowledge Base source S3 bucket to the data stack
    (`kb/{clinic_id}/` prefixes) and the Bedrock Knowledge Base over it
    in the agent stack — these deploy together, so they are one unit.
    The FAQ query tool lands with them, since it has nothing to query
    until the KB exists.
-10. Build the background Lambda + EventBridge schedule, reusing
-    `backend/tools/` functions.
-11. Build the staff dashboard (Cognito auth, appointment list,
+9. Build the background Lambda + EventBridge schedule, reusing
+   `backend/tools/` functions.
+10. Build the staff dashboard (Cognito auth, appointment list,
     escalation queue).
-12. Seed the two demo clinics (dental, cosmetic) with config,
+11. Seed the two demo clinics (dental, cosmetic) with config,
     sample appointments, and FAQ documents for the Knowledge Base.
-13. Architecture diagram, README, demo video, submission assets.
+12. Architecture diagram, README, demo video, submission assets.
 
 ## Open Questions
 
-- **What is the shape of a clinic's `hours` and `services` config?**
-  (Next Up #1 — blocks the availability tool.) `schema.py` fixed the
-  attribute names and stopped there, because everything below them is
-  an availability rule rather than a storage detail. Undecided:
-  (a) how opening hours are expressed — per weekday with open/close
-  times, and whether a clinic can have a lunch break or split shift;
-  (b) how one-off closures/holidays are represented, or whether the
-  demo simply has none; (c) whether a service carries a duration (so a
-  45-minute consult blocks a different span than a 15-minute check-up)
-  or every appointment is one fixed-length slot; (d) slot granularity —
-  the interval availability is offered on (15/30 minutes), and whether
-  it is per clinic or global. The two demo clinics differ by design
-  ("different hours, services" — `project-overview.md` Goal 2), so
-  this has to hold at least two genuinely different configurations.
-  Decide in `architecture.md` -> Storage Model before writing
-  `check_availability`; the seed scripts write whatever is chosen.
+- ~~**What is the shape of a clinic's `hours` and `services`
+  config?**~~ **Resolved** — specified in `architecture.md` ->
+  Storage Model, "Clinic availability config". All four sub-questions
+  answered by the user: (a) per-weekday **list** of `{open, close}`
+  intervals, so a lunch break or split shift is expressible;
+  (b) whole-day `closures` entries `{date, label}`, no partial-day
+  case; (c) per-service `duration_minutes`; (d) per-clinic
+  `slot_minutes`. See Completed.
 
 - **What does one entry in an appointment's `reminders` /
   `reschedule_history` list contain?** Deferred, not blocking: the
@@ -316,6 +331,40 @@ remaining tools are split out below, one per unit.
   `source` is `voice` or `background` because
   `project-overview.md` describes exactly those two paths feeding one
   queue, and the queue has to show which is which.
+
+- **A clinic's availability rules live entirely on its own item.** The
+  five config attributes (`timezone`, `hours`, `closures`, `services`,
+  `slot_minutes`) are together sufficient to decide whether a time is
+  bookable — no global constant, no environment variable, no
+  per-clinic branch in code. That is what makes "the same deployed
+  agent serves two different clinics" (`project-overview.md` Goal 2) a
+  property of the data rather than a claim, and it is why
+  `slot_minutes` is per clinic rather than a module constant: a global
+  one would be a second place a clinic's behaviour is defined.
+
+- **Hours are wall-clock local; stored timestamps are UTC; the
+  scheduling tools are the only conversion point.** A clinic says it
+  opens at 09:00, not at an instant, so `hours` and `closures` cannot
+  be UTC without breaking across a DST boundary. Storage cannot be
+  local, because `starts_at` is a bytewise-ordered sort key. Fixing the
+  boundary at the scheduling tools means no other layer — Lambda,
+  dashboard, agent prompt — ever holds a local-time value it might
+  compare against a stored one.
+
+- **A slot is offered only if the whole service fits inside one opening
+  interval.** Start times are generated on the `slot_minutes` grid, but
+  the *duration* is what gets validated against the interval, so a
+  60-minute consult is never offered at 12:30 against a 13:00 lunch
+  break. This is also why `duration_minutes` need not be a multiple of
+  `slot_minutes` — the grid places starts, the duration decides fit,
+  and conflating the two would force every service length to be a
+  multiple of the granularity.
+
+- **Whole-day closures only.** A partial-day closure would be a second
+  kind of interval subtraction layered on `hours`, doubling the branches
+  in the one function the whole booking flow depends on, for a case the
+  demo does not need. A clinic that closes early on a given day is
+  representable as a change to `hours` if it is recurring.
 
 - **Phone numbers are normalised at the boundary, not at read time.**
   The `by-phone` index is an equality match, so "555 123 4567" from

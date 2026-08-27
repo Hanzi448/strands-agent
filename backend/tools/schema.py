@@ -9,11 +9,12 @@ scripts spell attribute names by importing from here -- never as inline
 string literals, because a misspelled attribute name in DynamoDB is a
 silently absent field rather than an error.
 
-The value *shapes* of the nested clinic fields (`hours`, `services`) are
-deliberately not fixed here -- they are availability-logic decisions,
-tracked as an open question in `progress-tracker.md`. This module fixes
-names, vocabularies, and the key/timestamp encodings the tables' sort
-keys depend on.
+The value *shapes* of the nested clinic fields (`hours`, `closures`,
+`services`) are specified in `architecture.md` -> Storage Model ("Clinic
+availability config"), not here. This module fixes names, vocabularies,
+and the key/timestamp encodings the tables' sort keys depend on; the
+nested key names inside those values land here as constants with the
+first tool that reads them (`check_availability`).
 
 The key attribute and index names below must match
 `backend/infra/data_stack.py` exactly;
@@ -132,17 +133,25 @@ class ClinicAttrs:
 
     Fields follow `project-overview.md` ("clinic config: name, type,
     hours, services, contact info"), plus `TIMEZONE`, without which
-    `HOURS` and "runs daily per clinic" have no fixed meaning. `HOURS` and
-    `SERVICES` hold nested values whose shape is an open question -- see
-    the module docstring.
+    `HOURS` and "runs daily per clinic" have no fixed meaning.
+
+    `TIMEZONE`, `HOURS`, `CLOSURES`, `SERVICES` and `SLOT_MINUTES` are the
+    complete availability config: `architecture.md` -> Storage Model
+    requires that nothing outside a clinic's own item is consulted to
+    decide whether a time is bookable. Their nested value shapes are
+    specified there -- see the module docstring.
     """
 
     CLINIC_ID: Final[str] = CLINIC_ID
     NAME: Final[str] = "name"
     CLINIC_TYPE: Final[str] = "clinic_type"
+    # Availability config. Hours and closures are clinic-local wall-clock
+    # time; every timestamp this layer stores stays UTC.
     TIMEZONE: Final[str] = "timezone"
     HOURS: Final[str] = "hours"
+    CLOSURES: Final[str] = "closures"
     SERVICES: Final[str] = "services"
+    SLOT_MINUTES: Final[str] = "slot_minutes"
     CONTACT_EMAIL: Final[str] = "contact_email"
     CONTACT_PHONE: Final[str] = "contact_phone"
     CREATED_AT: Final[str] = CREATED_AT
