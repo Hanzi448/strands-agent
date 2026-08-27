@@ -17,7 +17,11 @@ local-time value it might compare against a stored one.
 
 Read-only: nothing here writes. A slot offered by `check_availability` can
 be taken before the caller answers, so `book_appointment` re-checks the slot
-it is finally given rather than trusting a list returned earlier.
+it is finally given rather than trusting a list returned earlier -- through
+`offerable_slots_for_date`, which is the same `_day_plan`/`_compute_slots`
+pair `check_availability` runs. The rule stays in one place: the write asks
+this module whether a time is offerable, it never re-walks
+`hours`/`closures` itself.
 """
 
 from __future__ import annotations
@@ -207,6 +211,66 @@ def check_availability(
         "slots": slots,
         "days_checked": days_checked,
     }
+
+
+def offerable_slots_for_date(
+    clinic: dict[str, Any],
+    local_date: date_type,
+    service_entry: dict[str, Any],
+    zone: ZoneInfo,
+) -> list[dict[str, str]]:
+    """Freshly compute the slots one clinic can offer on one local date.
+
+    The seam `book_appointment` re-checks against. It runs exactly the pair
+    `check_availability` runs per day -- `_day_plan` then `_compute_slots`
+    -- so a time is bookable if and only if this module would have offered
+    it. A write that restated the composition rule instead would be a
+    second copy of the booking system's core logic, and the two would drift.
+
+    Separate from `check_availability` rather than a call into it because a
+    write needs one *date*, not a window, and needs the current answer, not
+    a shape formatted for a model to read aloud.
+
+    Args:
+        clinic: A clinic item from `get_clinic`.
+        local_date: The clinic-local calendar date to compute.
+        service_entry: A normalised entry from `resolve_service` -- its
+            `duration_minutes` is what decides whether a start fits.
+        zone: The clinic's timezone, from `clinic_timezone`.
+
+    Returns:
+        The same slot dicts `check_availability` returns, for that one day,
+        earliest first. Empty if the clinic is closed that day (for either
+        reason) or if every candidate start is taken -- a write does not
+        need to tell those apart, since none of them is bookable.
+
+    Raises:
+        ValidationError: If the clinic item carries no usable `clinic_id`.
+        ConfigurationError: If the clinic's stored availability config is
+            unusable.
+    """
+    clinic_id = require_clinic_id(clinic.get(CLINIC_ID))
+    plan = _day_plan(clinic, local_date, zone)
+    if not plan.intervals:
+        # No query at all on a closed day: the answer cannot depend on what
+        # is booked.
+        return []
+    slot_minutes = _positive_int(
+        clinic.get(ClinicAttrs.SLOT_MINUTES), ClinicAttrs.SLOT_MINUTES, clinic_id
+    )
+    booked = _booked_spans(
+        clinic_id,
+        _local_midnight(local_date, zone),
+        _local_midnight(local_date + _ONE_DAY, zone),
+    )
+    return _compute_slots(
+        intervals=plan.intervals,
+        local_date=local_date,
+        duration_minutes=service_entry[ServiceAttrs.DURATION_MINUTES],
+        slot_minutes=slot_minutes,
+        booked=booked,
+        zone=zone,
+    )
 
 
 class _DayPlan(NamedTuple):

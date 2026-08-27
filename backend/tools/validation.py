@@ -33,6 +33,9 @@ MAX_TEXT_LENGTH = 2000
 MIN_PHONE_DIGITS = 7
 MAX_PHONE_DIGITS = 15
 
+# RFC 5321's cap on a whole address.
+MAX_EMAIL_LENGTH = 254
+
 
 def require_clinic_id(clinic_id: str | None) -> str:
     """Validate the tenant argument. Call this first in every tool function.
@@ -251,12 +254,27 @@ def require_enum[E: StrEnum](value: str | E | None, enum_cls: type[E], field: st
 
 
 def normalise_phone(value: str | None, field: str = "phone") -> str:
-    """Validate a phone number and reduce it to one canonical form.
+    """Validate a phone number and reduce it to one canonical form: its digits.
 
-    The `by-phone` index does an equality match on the stored string, so a
-    number spoken as "555 123 4567" and one seeded as "+15551234567" have
-    to converge here or the caller lookup silently misses. Digits are
-    kept, a leading ``+`` is kept, and every separator is dropped.
+    The `by-phone` index does an equality match on the stored string, so
+    every way of writing one number has to collapse to one key here or
+    `patients.find_patients_by_phone` silently misses a returning caller.
+    Digits are kept and everything else -- spaces, brackets, dashes, and a
+    leading ``+`` -- is dropped.
+
+    The ``+`` is dropped rather than preserved *because* it is not a digit:
+    keeping it conditionally (as this function first did) made
+    ``"+1 555 123 4567"`` and ``"1-555-123-4567"`` two different keys for
+    one number, which is exactly the miss this normalisation exists to
+    prevent. Nothing reads the stored value as an E.164 address -- it is a
+    lookup key and a string staff may read -- so the marker costs a
+    correctness bug and buys nothing.
+
+    What this does **not** do is reconcile a national number with its
+    international form: ``"555 123 4567"`` and ``"+1 555 123 4567"`` stay
+    distinct, because turning the first into the second requires assuming
+    a country, which no context file specifies. See `progress-tracker.md`
+    -> Open Questions.
 
     This is storage normalisation, not validation of real-world
     reachability -- no country/carrier check is performed.
@@ -266,7 +284,7 @@ def normalise_phone(value: str | None, field: str = "phone") -> str:
         field: Attribute name, used in the error message.
 
     Returns:
-        ``+`` (if present in the input) followed by digits only.
+        The number's digits, in order, with nothing else.
 
     Raises:
         ValidationError: If it is missing, or has an implausible number of
@@ -281,4 +299,39 @@ def normalise_phone(value: str | None, field: str = "phone") -> str:
             f"{field} must contain between {MIN_PHONE_DIGITS} and "
             f"{MAX_PHONE_DIGITS} digits; got {raw!r}."
         )
-    return f"+{digits}" if raw.startswith("+") else digits
+    return digits
+
+
+def normalise_email(value: str | None, field: str = "email") -> str:
+    """Validate an email address and trim it, without pretending to verify it.
+
+    A deliberately shallow check: one ``@``, something either side, no
+    whitespace, within RFC 5321's length cap. It exists to stop a
+    transcription artefact ("dave at gmail dot com") from being stored as
+    a patient's contact address, not to decide whether mail would arrive
+    -- only SES can answer that, and an over-strict regex here would
+    reject valid addresses a patient actually owns.
+
+    Args:
+        value: The candidate address, from speech or from a seed script.
+        field: Attribute name, used in the error message.
+
+    Returns:
+        The trimmed address, as given. Case is preserved: the local part
+        of an address is case-sensitive by the standard, and nothing here
+        needs to match two addresses against each other.
+
+    Raises:
+        ValidationError: If it is missing, blank, over-long, or not
+            recognisably an address.
+    """
+    cleaned = require_text(value, field, max_length=MAX_EMAIL_LENGTH)
+    local, separator, domain = cleaned.partition("@")
+    if not separator or not local or not domain or "@" in domain:
+        raise ValidationError(
+            f"{field} must be an email address such as 'name@example.com'; "
+            f"got {cleaned!r}."
+        )
+    if any(character.isspace() for character in cleaned):
+        raise ValidationError(f"{field} must not contain spaces; got {cleaned!r}.")
+    return cleaned

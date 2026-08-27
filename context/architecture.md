@@ -95,6 +95,28 @@ EventBridge, Bedrock, and SES are all pay-per-use managed services.
     Minimal demo profile (name, contact). One index:
     - `by-phone` (`clinic_id` / `phone`) — a voice caller identifies
       themselves by phone number, not by id.
+    - **Patient identity** — a caller is the same person as an existing
+      record when **phone and name both match**. Phone alone is not
+      enough: a household shares a number, and treating a spouse's
+      booking as the first-registered patient's would put the wrong name
+      on the appointment and on the reminder email, silently and with no
+      way for staff to notice. Name alone is not enough either, since
+      names are not unique. The accepted cost is a duplicate record when
+      one person is heard as "Dave" one week and "David" the next —
+      visible on the staff dashboard, harmless to the booking itself, and
+      the failure worth having in that direction. Names are compared
+      case-insensitively with whitespace collapsed, because the value
+      arrives from speech and neither carries information. Implemented in
+      `backend/tools/patients.py`; a patient's stored details are never
+      rewritten by a booking, except that a missing `email` is filled in
+      (additive, and without it the reminder job has no address).
+    - `phone` is stored as **digits only** (`normalise_phone`), a leading
+      `+` included in what is stripped. The index does an equality match,
+      so every way of writing one number must collapse to one key;
+      preserving the `+` conditionally made `+1 555…` and `1-555…` two
+      keys for one number. This does *not* reconcile a national number
+      with its international form — see `progress-tracker.md` → Open
+      Questions.
   - `Escalations` — partition key `clinic_id`, sort key
     `escalation_id`. What was flagged, why, resolved status. One index:
     - `by-created-at` (`clinic_id` / `created_at`) — the dashboard

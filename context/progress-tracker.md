@@ -7,25 +7,25 @@ Update this file after every meaningful implementation change.
 - Phase 2: business logic. The AWS sample is vendored as reference
   code, `backend/infra/` synthesises with the four DynamoDB tables
   defined (the other four stacks are still empty), and `backend/tools/`
-  has its foundation plus the **complete availability read surface**:
-  `check_availability` reads a clinic's config and its booked
-  appointments and returns offerable slots, for one day or for a
-  bounded window of up to 14. The scheduling *writes* (book,
-  reschedule, cancel) are still to come — nothing in `backend/tools/`
-  mutates anything yet. `frontend/`, `backend/agents/`,
-  `backend/lambda/`, and `seed/` do not exist yet.
+  has its foundation, the **complete availability read surface**
+  (`check_availability`, one day or a bounded window of up to 14), and
+  the **first write**: `book_appointment` commits a slot and registers
+  the caller. `reschedule_appointment` and `cancel_appointment` are
+  still to come. `frontend/`, `backend/agents/`, `backend/lambda/`, and
+  `seed/` do not exist yet.
 
 ## Current Goal
 
-- Continue the tool functions one at a time. The availability *read*
-  surface is now final: `check_availability` answers both "is Thursday
-  free?" and "when are you next free?", so the Scheduling sub-agent can
-  be written against a shape that will not move. Next is
-  `book_appointment` — the first *write*, and the one that needs
-  patient lookup-or-create by phone via the `by-phone` index. The
-  remaining writes, the escalation tools, the agents, the KB bucket,
-  the frontend adapted from the vendored AWS Nova Sonic sample, and the
-  seed scripts follow.
+- Continue the tool functions one at a time. Booking now works end to
+  end against the seeded demo configs: check availability, book a slot,
+  and the slot stops being offered. The seam that made that safe —
+  `scheduling.offerable_slots_for_date` — is what the two remaining
+  writes must also re-check against, so they add a state transition
+  each rather than any new availability logic. Next is
+  `reschedule_appointment` and `cancel_appointment`, which share the
+  reschedule-history append. The escalation tools, the agents, the KB
+  bucket, the frontend adapted from the vendored AWS Nova Sonic sample,
+  and the seed scripts follow.
 
 ## Completed
 
@@ -196,6 +196,67 @@ Update this file after every meaningful implementation change.
   and a Monday whose 09:30 start is missing because an appointment
   holds it.
 
+- **`book_appointment` in `backend/tools/booking.py`, plus patient
+  lookup-or-create in `backend/tools/patients.py`** (Next Up #1). The
+  first code in this layer that writes. `book_appointment` re-checks the
+  requested time, resolves the caller from their phone number and name,
+  and writes one `Appointments` item; a refused booking writes nothing
+  at all, patient row included, because a voice caller retries and a
+  half-written first attempt is what turns one retry into two records.
+  **The availability rule is not restated.** `scheduling.py` gained one
+  public function, `offerable_slots_for_date`, which runs the same
+  `_day_plan`/`_compute_slots` pair `check_availability` runs, for a
+  single date; booking asks *that* whether a time is bookable and takes
+  the stored `ends_at` from the matched slot rather than recomputing
+  one. So a slot is bookable if and only if the read surface would have
+  offered it, and `architecture.md` -> Invariants #3 holds by
+  construction rather than by discipline. `scheduling.py` stays
+  read-only.
+  Patient identity is **phone and name together**, confirmed with the
+  user rather than defaulted (`ai-workflow-rules.md` -> Handling Missing
+  Requirements) and written into `architecture.md` -> Storage Model: a
+  household shares a number, so phone alone would put a spouse's booking
+  under the first-registered patient's name, silently. An existing
+  patient's details are never rewritten by a booking — the one exception
+  is a missing `email`, which is filled in, since that adds a fact
+  rather than overwriting one and the reminder job has no address
+  without it.
+  Also landed: `validation.normalise_email` (a deliberately shallow
+  check — it stops "dave at gmail dot com" being stored, and does not
+  pretend to know whether mail would arrive), and `patient_summary`,
+  which fixes what a tool result tells the model about a patient.
+  Verified: `pytest` from `backend/` — **254 passed** (165 before, 89
+  net new). The booking suite imports its clinic fixtures from
+  `test_scheduling.py` rather than restating them, so a rule that
+  drifted between the read and the write shows up as a disagreement
+  between the two files; it covers the slot taken between quote and
+  write, a start off the clinic's grid, a 30-minute cleaning refused at
+  12:45 against the 13:00 lunch break (the same case the read suite
+  asserts), a closed weekday, the seeded closure day, both clinics'
+  differing rules, an instant whose *clinic-local* day is the next one,
+  and that nothing is written on any refusal.
+  Eyeballed end to end against the seeded dental config: 28 free
+  cleaning slots, book 09:00, 26 remain with 09:00 *and* 09:15 gone (a
+  30-minute service on a 15-minute grid), the same time refused on retry
+  with alternatives named, and the same caller recognised on a second
+  call.
+
+- **Fixed: `normalise_phone` gave one number two index keys**
+  (surfaced by the end-to-end eyeball above, not by a test). It kept a
+  leading `+` when the input had one and dropped it otherwise, so
+  `"+1 555 123 4567"` and `"1-555-123-4567"` stored as different
+  strings — and the `by-phone` index is an equality match, so a caller
+  who said "plus one" on their second call got a *second patient
+  record* instead of their own. The function's own docstring claimed the
+  opposite, and the existing test asserted the divergence while being
+  named `..._converges_on_one_stored_form`, which is why 165 passing
+  tests never caught it. Now digits only, with the docstring corrected
+  to state exactly what converges and what does not. What it still
+  cannot do is reconcile a national number with its international form
+  (`555 123 4567` vs `+1 555 123 4567`) — that needs a country
+  assumption no context file makes, so it is an open question below and
+  a test asserts the limit rather than leaving it implied.
+
 ## In Progress
 
 - None.
@@ -208,36 +269,35 @@ forbids in one step. Its foundation, the spec decision that blocked the
 first tool, and the whole availability *read* surface are done (see
 Completed); the remaining tools are split out below, one per unit.
 
-1. `book_appointment` — plus the patient lookup-or-create by phone
-   (the `by-phone` index) that booking needs to resolve a caller.
-   Reuses `scheduling.get_clinic` / `resolve_service` and re-checks the
-   requested slot against `check_availability`'s rule rather than
-   restating it: a slot offered to a patient can be taken while they
-   are still deciding, so the conflict check belongs on the write.
-   Note that the availability rule now lives behind `_day_plan` /
-   `_compute_slots` for a *single* date, which is the seam the write
-   should re-use — it must not re-walk `hours`/`closures` itself.
-2. `reschedule_appointment` and `cancel_appointment` — the two writes
-   that share the reschedule-history append.
-3. Escalation tools — create, list open, mark resolved.
-4. Build the Orchestrator agent + Scheduling/FAQ/Escalation
+1. `reschedule_appointment` and `cancel_appointment` — the two writes
+   that share the reschedule-history append. Both re-check the target
+   slot through `scheduling.offerable_slots_for_date`, exactly as
+   `book_appointment` does; neither may re-walk `hours`/`closures`.
+   Both find the caller's appointment through the `by-patient` index
+   (`clinic_patient_key`), so `patients.find_patients_by_phone` is the
+   entry point again. The `reschedule_history` entry shape is already
+   specified (`architecture.md` -> Storage Model, "Appointment history
+   entry shapes"); its nested key names land in `schema.py` with this
+   unit, as noted there.
+2. Escalation tools — create, list open, mark resolved.
+3. Build the Orchestrator agent + Scheduling/FAQ/Escalation
    sub-agents (Agent-as-Tool pattern), test locally with a text
    interface before wiring voice.
-5. Wire Nova Sonic + BidiAgent voice on top of the working
+4. Wire Nova Sonic + BidiAgent voice on top of the working
    text-agent logic.
-6. Deploy to AgentCore Runtime, verify voice session end-to-end.
-7. Add the Knowledge Base source S3 bucket to the data stack
+5. Deploy to AgentCore Runtime, verify voice session end-to-end.
+6. Add the Knowledge Base source S3 bucket to the data stack
    (`kb/{clinic_id}/` prefixes) and the Bedrock Knowledge Base over it
    in the agent stack — these deploy together, so they are one unit.
    The FAQ query tool lands with them, since it has nothing to query
    until the KB exists.
-8. Build the background Lambda + EventBridge schedule, reusing
+7. Build the background Lambda + EventBridge schedule, reusing
    `backend/tools/` functions.
-9. Build the staff dashboard (Cognito auth, appointment list,
+8. Build the staff dashboard (Cognito auth, appointment list,
    escalation queue).
-10. Seed the two demo clinics (dental, cosmetic) with config,
-    sample appointments, and FAQ documents for the Knowledge Base.
-11. Architecture diagram, README, demo video, submission assets.
+9. Seed the two demo clinics (dental, cosmetic) with config,
+   sample appointments, and FAQ documents for the Knowledge Base.
+10. Architecture diagram, README, demo video, submission assets.
 
 ## Open Questions
 
@@ -282,6 +342,33 @@ Completed); the remaining tools are split out below, one per unit.
   dependency here is an experimental voice stack, and a capability
   found missing late costs more than the extra round-trip latency of
   a browser demo.
+- **Does a spoken phone number need a default country code?**
+  `normalise_phone` now stores digits only, so every *format* of one
+  number converges. What does not converge is a national number against
+  its international form: a patient who says "555 123 4567" on their
+  first call and "plus one, 555 123 4567" on their second gets two
+  patient records. Fixing it means assuming a country code (the demo
+  clinics are `Europe/London`, which argues `+44`, but the seeded
+  numbers are not written yet), and that is product behaviour no context
+  file states. Options: (a) assume one country code per clinic, stored
+  on the clinic item alongside `timezone`; (b) leave it, and have the
+  seed scripts and the agent prompt use one consistent form; (c) match
+  on a digit *suffix*, which risks collisions. Not blocking —
+  `book_appointment` works either way — but it should be settled before
+  the seed scripts fix a number format.
+
+- **Slot contention between the re-check and the write.**
+  `book_appointment` re-checks availability immediately before writing,
+  which closes the conversation-length gap (tens of seconds) between a
+  slot being quoted and being taken. It does not close the milliseconds
+  between that check and the `put_item`: DynamoDB cannot condition a
+  write on "nothing overlaps this span" without a transaction over rows
+  that do not exist yet, so two callers colliding inside that window
+  would both be booked. Accepted for a two-clinic demo and documented in
+  `booking.py` rather than hidden. The real fix, if it is ever wanted,
+  is a conditionally-written per-clinic-slot lock item — a design
+  change, not a line of defensive code.
+
 - **Project name**: using "ClinicPilot" as a placeholder throughout
   — rename before final submission if a better name comes up.
 - **Nova Sonic/BidiAgent stability**: marked experimental by AWS

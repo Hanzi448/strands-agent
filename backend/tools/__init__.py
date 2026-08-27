@@ -12,6 +12,10 @@ Modules:
     errors: the exception vocabulary tools raise.
     scheduling: availability -- and the only place clinic-local wall-clock
         time is converted to and from the UTC everything else stores.
+    patients: the phone-number lookup a voice caller arrives by, and the
+        rule for when two calls are the same person.
+    booking: `book_appointment` -- the first write. Decides nothing about
+        availability itself; it re-asks `scheduling` at write time.
 
 Nothing here imports Strands or AgentCore. The `@tool`-decorated agent
 surface lives in `backend/agents/`; this layer stays callable from a

@@ -90,15 +90,33 @@ def test_require_enum_error_lists_the_allowed_values() -> None:
 @pytest.mark.parametrize(
     ("spoken", "expected"),
     [
-        ("+1 (555) 123-4567", "+15551234567"),
+        ("+1 (555) 123-4567", "15551234567"),
+        ("1-555-123-4567", "15551234567"),
+        ("  1 555 123 4567  ", "15551234567"),
         ("555 123 4567", "5551234567"),
         ("555-123-4567", "5551234567"),
-        ("+44 20 7946 0958", "+442079460958"),
+        ("+44 20 7946 0958", "442079460958"),
     ],
 )
 def test_normalise_phone_converges_on_one_stored_form(spoken, expected) -> None:
-    """The `by-phone` index is an equality match; formats must converge."""
+    """The `by-phone` index is an equality match; formats must converge.
+
+    Including the ``+``: a leading marker that survived normalisation gave
+    one number two index keys, so a caller who said "plus one" on Monday
+    and did not on Tuesday got two patient records.
+    """
     assert normalise_phone(spoken) == expected
+
+
+def test_normalise_phone_does_not_invent_a_country_code() -> None:
+    """The limit of what this can converge, asserted rather than assumed.
+
+    A national number cannot be turned into its international form without
+    assuming a country, which no context file specifies -- so these stay
+    two keys, and it is `progress-tracker.md` -> Open Questions that has to
+    resolve it, not a default picked here.
+    """
+    assert normalise_phone("555 123 4567") != normalise_phone("+1 555 123 4567")
 
 
 @pytest.mark.parametrize("bad", ["", "12345", "1" * 16, "no digits here", None])
