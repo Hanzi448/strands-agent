@@ -4,28 +4,35 @@ Update this file after every meaningful implementation change.
 
 ## Current Phase
 
-- Phase 2: business logic. The AWS sample is vendored as reference
-  code, `backend/infra/` synthesises with the four DynamoDB tables
-  defined (the other four stacks are still empty), and `backend/tools/`
-  has its foundation, the **complete availability read surface**
-  (`check_availability`, one day or a bounded window of up to 14), and
-  the **complete scheduling write surface**: `book_appointment`,
-  `reschedule_appointment`, and `cancel_appointment`. The escalation
-  tools are the last of the tool layer. `frontend/`,
-  `backend/agents/`, `backend/lambda/`, and `seed/` do not exist yet.
+- Phase 2 is **complete on the tool layer**. The AWS sample is vendored
+  as reference code, `backend/infra/` synthesises with the four DynamoDB
+  tables defined (the other four stacks are still empty), and
+  `backend/tools/` now has its foundation, the **complete availability
+  read surface** (`check_availability`, one day or a bounded window of
+  up to 14), the **complete scheduling write surface**
+  (`book_appointment`, `reschedule_appointment`, `cancel_appointment`),
+  and the **complete escalation surface** (`create_escalation`,
+  `list_open_escalations`, `get_escalation`, `resolve_escalation`).
+  All four tables are now written by this layer. The one tool still
+  missing is the FAQ query, which has nothing to query until the
+  Knowledge Base exists and therefore lands with it (Next Up #4).
+  `frontend/`, `backend/agents/`, `backend/lambda/`, and `seed/` do not
+  exist yet.
 
 ## Current Goal
 
-- Continue the tool functions one at a time. The whole appointment
-  lifecycle now works end to end against the seeded demo configs:
-  check availability, book a slot, move it, cancel it, and see the
-  freed time offered again. All three writes go through one seam,
-  `scheduling.offerable_slots_for_date`, so none of them holds an
-  availability rule of its own. Next is the **escalation tools**
-  (create, list open, mark resolved) — the last of `backend/tools/`,
-  and the one the Escalation sub-agent needs before the agents can be
-  built. The agents, the KB bucket, the frontend adapted from the
-  vendored AWS Nova Sonic sample, and the seed scripts follow.
+- **Phase 3: the agents.** `backend/tools/` is done, so the next unit
+  is the first one that is not a pure function over DynamoDB. Build the
+  Orchestrator plus the Scheduling and Escalation sub-agents
+  (Agent-as-Tool), wrapping the existing tool functions with `@tool`
+  and testing against a text interface before any voice is wired — the
+  FAQ sub-agent waits for the Knowledge Base. Nothing in
+  `backend/tools/` may move into an agent definition
+  (`architecture.md` -> Invariants #3): the agents are a thin
+  model-facing surface over functions the background Lambda will call
+  directly. After the agents: Nova Sonic voice, AgentCore deploy, the
+  KB bucket plus the FAQ tool, the background Lambda, the dashboard,
+  and the seed scripts.
 
 ## Completed
 
@@ -257,10 +264,6 @@ Update this file after every meaningful implementation change.
   assumption no context file makes, so it is an open question below and
   a test asserts the limit rather than leaving it implied.
 
-## In Progress
-
-- None.
-
 - **`reschedule_appointment` and `cancel_appointment` in
   `backend/tools/appointments.py`** (Next Up #1). The appointment
   lifecycle after booking, and the last of the scheduling tools. One
@@ -330,37 +333,115 @@ Update this file after every meaningful implementation change.
   including a lost race. Each of six guards was mutation-checked —
   removing it fails at least one test.
 
+- **Escalation tools in `backend/tools/escalations.py`** (Next Up #1).
+  The last of `backend/tools/`, and the only module here whose items
+  exist to be **read by a person** rather than acted on by the agent:
+  `create_escalation`, `list_open_escalations`, `resolve_escalation`,
+  plus `get_escalation` (see below). `Escalations` was the one table
+  nothing had written; `EscalationStatus`/`EscalationSource` and
+  `EscalationAttrs` were already fixed in `schema.py`, so **no schema
+  change was needed** — this unit is one new module and its tests.
+  **Creating one must not acquire a way to fail.** An escalation is
+  written when everything else has already gone wrong, so
+  `create_escalation` reads nothing: `patient_id` and `appointment_id`
+  are validated for *shape* and stored unverified. Checking that they
+  resolve would let a stale reference stop the escalation being
+  recorded at all, and a mis-referenced escalation a human can still
+  read beats a correct one that was never written. `source` is
+  keyword-only and defaults to `voice`, exactly as
+  `reschedule_appointment`'s `actor` defaults to `agent`: it records
+  which agent path raised the item, the live agent and the background
+  job each know their own, and it is never a value a model chooses.
+  **The queue is capped after the status filter, not by DynamoDB.**
+  `list_open_escalations` walks `by-created-at` backwards
+  (`ScanIndexForward=False`) and filters to `open` in Python — the
+  choice `architecture.md` -> Storage Model already records for this
+  index. The `limit` is applied *after* that filter and is deliberately
+  not passed as DynamoDB's `Limit`, which counts items **scanned**: a
+  clinic whose newest 50 escalations are all resolved would otherwise
+  show an empty queue while its real one was full. Ties on
+  `created_at` (second precision) are broken by `escalation_id`, so
+  "which is at the top?" does not vary between two identical calls —
+  the same determinism `find_patients_by_phone` needs.
+  **Resolving twice is refused, not absorbed.** Both the read-time
+  check and the conditional write raise `ConflictError`, for the reason
+  `reschedule_appointment` refuses a move to the time an appointment
+  already has: two staff working one queue need to hear that the other
+  got there first, and a silent success tells them the opposite. See
+  Open Questions — this is the one place the unit went past the letter
+  of the spec.
+  **`get_escalation` is a fourth function on a three-function item**,
+  flagged rather than buried. `resolve_escalation` needs the read
+  anyway (read, then conditional write, as `appointments` does), and
+  two readers hold an id without the item: the dashboard's escalation
+  detail modal (`ui-context.md` -> Layout Patterns) and a staff member
+  arriving from the SES escalation email. Making it public rather than
+  private is what stops the dashboard adding a second `get_item`.
+  The tenant boundary needs nothing beyond `require_clinic_id` here:
+  the table is keyed on `(clinic_id, escalation_id)` and the index is
+  partitioned on `clinic_id`, so another clinic's escalation is a
+  `NotFoundError` indistinguishable from one that never existed — and
+  a test asserts the two messages are identical. Nothing belongs to a
+  *patient*, so there is no ownership resolution of the kind
+  `appointments._resolve_appointment` carries.
+  Verified: `pytest` from `backend/` — **380 passed** (315 before, 65
+  new), the pre-existing 315 unchanged (nothing outside this module was
+  touched except the `tools/__init__.py` module list). The fake
+  `Escalations` table honours the index partition key and
+  `ScanIndexForward`, serves fixed-size pages so pagination is
+  exercised rather than assumed, and *applies* the `UpdateExpression`
+  it is given, so the `#status` aliasing that DynamoDB's reserved word
+  forces fails here rather than in a deployed Lambda. Ten guards were
+  mutation-checked; the first pass caught nine and found a real gap —
+  nothing pinned that `clinic_id` is validated **before** the other
+  arguments, since the tenant test passed a blank clinic id with an
+  otherwise valid call. A test with *every* argument bad now asserts
+  the failure names `clinic_id` and not the second argument, and the
+  swap is caught for all four functions.
+
+## In Progress
+
+- None.
+
 ## Next Up
 
 The old item 1 ("implement `backend/tools/`") bundled five unrelated
 tool families, which `ai-workflow-rules.md` -> When to Split Work
-forbids in one step. Its foundation, the spec decision that blocked the
-first tool, and the whole availability *read* surface are done (see
-Completed); the remaining tools are split out below, one per unit.
+forbids in one step. It is now **fully discharged**: the foundation,
+the spec decision that blocked the first tool, the availability read
+surface, the scheduling write surface, and the escalation tools are all
+in Completed. The only tool still unwritten is the FAQ query, which
+belongs to the Knowledge Base unit below rather than to that item.
 
-1. Escalation tools — create, list open, mark resolved. The last of
-   `backend/tools/`. `Escalations` is the one table nothing has
-   written yet, and `EscalationStatus`/`EscalationSource` are already
-   fixed in `schema.py`; the `by-created-at` index is the dashboard's
-   newest-first read, filtered to open ones.
-2. Build the Orchestrator agent + Scheduling/FAQ/Escalation
-   sub-agents (Agent-as-Tool pattern), test locally with a text
-   interface before wiring voice.
-3. Wire Nova Sonic + BidiAgent voice on top of the working
+1. Build the Orchestrator agent + Scheduling/Escalation sub-agents
+   (Agent-as-Tool pattern), test locally with a text interface before
+   wiring voice. The FAQ sub-agent is **not** part of this unit — it
+   has nothing to query until item 4 exists, and adding an empty one
+   now would mean writing its prompt twice. Split further if it does
+   not stay verifiable end to end in one step (the Orchestrator and
+   its routing first, sub-agents after, is the natural seam).
+2. Wire Nova Sonic + BidiAgent voice on top of the working
    text-agent logic.
-4. Deploy to AgentCore Runtime, verify voice session end-to-end.
-5. Add the Knowledge Base source S3 bucket to the data stack
+3. Deploy to AgentCore Runtime, verify voice session end-to-end.
+4. Add the Knowledge Base source S3 bucket to the data stack
    (`kb/{clinic_id}/` prefixes) and the Bedrock Knowledge Base over it
    in the agent stack — these deploy together, so they are one unit.
-   The FAQ query tool lands with them, since it has nothing to query
-   until the KB exists.
-6. Build the background Lambda + EventBridge schedule, reusing
-   `backend/tools/` functions.
-7. Build the staff dashboard (Cognito auth, appointment list,
-   escalation queue).
-8. Seed the two demo clinics (dental, cosmetic) with config,
+   The FAQ query tool and the FAQ sub-agent land with them, since they
+   have nothing to query until the KB exists.
+5. Build the background Lambda + EventBridge schedule, reusing
+   `backend/tools/` functions. Its no-show/reschedule heuristic is not
+   specified anywhere yet — per `ai-workflow-rules.md` -> When to Split
+   Work that is a spec-then-implement step, not something to invent
+   inline. Note the tool it needs already exists:
+   `create_escalation(..., source="background")`.
+6. Build the staff dashboard (Cognito auth, appointment list,
+   escalation queue). Its escalation reads are already written —
+   `list_open_escalations`, `get_escalation`, `resolve_escalation`.
+7. Seed the two demo clinics (dental, cosmetic) with config,
    sample appointments, and FAQ documents for the Knowledge Base.
-9. Architecture diagram, README, demo video, submission assets.
+   Settle the phone-number country-code question below first: this is
+   the step that fixes a number format.
+8. Architecture diagram, README, demo video, submission assets.
 
 ## Open Questions
 
@@ -417,6 +498,36 @@ Completed); the remaining tools are split out below, one per unit.
   then records that it happened but not who did it, which is what the
   log exists to show). Reversible: the encoding has one writer and, so
   far, no reader. If it is wrong, say so before the dashboard is built.
+
+- **Should marking an already-resolved escalation resolved be an
+  error?** Assumed **yes**, and implemented: `resolve_escalation`
+  raises `ConflictError` rather than succeeding quietly, both when the
+  read sees it already resolved and when the conditional write loses
+  the race. `project-overview.md` says only "staff can view an emailed
+  escalation and mark it resolved" and says nothing about the second
+  attempt, so this is where this unit went past the letter of the spec
+  — flagged rather than buried, exactly as the cancellation-history
+  decision above was. The reasoning: two staff working one queue, or
+  one staff member arriving from an email after a colleague has dealt
+  with it, need to *hear* that it is already handled; a silent success
+  tells them they resolved something they did not. The message names
+  the `resolved_at` stamp so the dashboard can say when. The cost is
+  that a double-click on "Mark Resolved" surfaces an error rather than
+  a no-op, which the dashboard can absorb by treating `conflict` on
+  this call as success. Reversible: one branch, one message, and the
+  tests that pin it are named for the behaviour. If the dashboard would
+  rather have it idempotent, say so before Next Up #6 is built.
+
+- **What bounds the escalation queue read?** `list_open_escalations`
+  takes an optional `limit`, defaulting to 50 and capped at 100
+  (`DEFAULT_ESCALATION_LIMIT`/`MAX_ESCALATION_LIMIT`). Not a product
+  rule and not asked about — a boundary decision of the same kind as
+  `appointments._APPOINTMENTS_IN_ERROR`, so that nothing can walk a
+  whole partition into a tool result. There is deliberately **no page
+  cursor**: no screen in `ui-context.md` reads one, and a result
+  exactly `limit` long is the only signal that more exist. If the
+  dashboard ever needs real pagination, the sort key is `created_at`
+  and the cursor is the last item's — an additive change.
 
 - **Can a returning caller who is heard differently reach their own
   appointment?** No, and this is the phone-number question below in a
@@ -740,7 +851,46 @@ Completed); the remaining tools are split out below, one per unit.
   condition on a row. The booking race is over a row that does not
   exist yet.
 
+- **An escalation is written unverified, on purpose.**
+  `create_escalation` validates the *shape* of `patient_id` and
+  `appointment_id` and stores them without checking that either
+  resolves. Every other write in this layer reads first; this one must
+  not, because it is the path taken when something has already gone
+  wrong. A lookup here would add a way for the record of a failure to
+  itself fail, and a human can act on a mis-referenced escalation but
+  not on one that was never written. It is also why the module reads
+  nothing at all on the create path — asserted by a test, not just
+  intended.
+
+- **The escalation queue's cap is applied after the status filter, in
+  Python — never as DynamoDB's `Limit`.** `Limit` bounds items
+  *scanned*, before any filtering, so asking DynamoDB for 50 would
+  return an empty queue for a clinic whose 50 newest escalations are
+  all resolved. This is the price of the "`status` is a filter, not a
+  key" decision above and is the correct half of that trade: paging
+  until enough open items are found costs reads only when the queue is
+  mostly resolved, whereas a composite status key costs write
+  complexity on every escalation.
+
 ## Session Notes
+
+- **The reschedule/cancel entry was filed under "In Progress" rather
+  than "Completed"** by the previous session, below a "- None." line,
+  while describing verified, committed work (`git log`: `a65db21`).
+  Reconciled before starting this unit, per `CLAUDE.md` ("if the repo
+  and the tracker disagree, stop and reconcile"): the entry moved to
+  Completed unchanged and "In Progress: None." now stands alone. No
+  work was lost or redone — this was a filing slip, not a state
+  disagreement.
+
+- **DynamoDB's `Limit` counts items scanned, not items returned.** It
+  applies *before* a `FilterExpression` and before any filtering the
+  caller does in Python, so a capped query over a partition whose
+  newest items are all filtered out comes back empty rather than short.
+  `list_open_escalations` therefore pages and caps in Python. This will
+  bite again wherever the dashboard reads a status-filtered list —
+  today's appointments most obviously — so cap after the filter there
+  too, or use a key that does not need one.
 
 - **Second venv: `backend/.venv`**, on 3.12 like the infra one, with
   `boto3` + `pytest` from `backend/requirements-dev.txt` (runtime deps

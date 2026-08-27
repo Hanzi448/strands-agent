@@ -20,6 +20,9 @@ Modules:
         `reschedule_appointment` and `cancel_appointment`. Works out which
         of a caller's appointments is meant, and re-asks `scheduling` the
         same way `booking` does.
+    escalations: what the agent could not safely do itself -- raising an
+        item for staff, reading the open queue, and marking one handled.
+        The one module here whose items exist to be read by a person.
 
 Nothing here imports Strands or AgentCore. The `@tool`-decorated agent
 surface lives in `backend/agents/`; this layer stays callable from a
