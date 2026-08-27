@@ -1,4 +1,4 @@
-"""Availability: the start times a clinic can offer, for one service, one day.
+"""Availability: the start times a clinic can offer, for one service.
 
 `architecture.md` -> Storage Model ("Clinic availability config") fixes the
 rules implemented here, and fixes them *entirely on the clinic's own item*:
@@ -25,7 +25,7 @@ from __future__ import annotations
 from datetime import date as date_type
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
-from typing import Any
+from typing import Any, Final, NamedTuple
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .dynamo import appointments_table, clinics_table
@@ -49,61 +49,90 @@ from .schema import (
 )
 from .validation import (
     MAX_IDENTIFIER_LENGTH,
+    require_bounded_int,
     require_clinic_id,
     require_date,
     require_text,
 )
 
-# The width of the clinic-local day the `by-start-time` query is bounded to.
+# `days` look-ahead bounds (`architecture.md` -> Storage Model, "Multi-day
+# look-ahead"). The default keeps "is Thursday free?" a one-day question;
+# the cap is what stops a model that guessed `365` from making a live voice
+# session wait on two weeks' worth of arithmetic and an over-wide query.
+DEFAULT_AVAILABILITY_DAYS: Final[int] = 1
+MAX_AVAILABILITY_DAYS: Final[int] = 14
+
+# One calendar day, added to a `date` rather than to an aware `datetime`:
+# local midnight plus 24 hours is 23:00 or 01:00 on a DST-transition day,
+# so every local day boundary here is built by combining the *next date*
+# with midnight, never by adding a `timedelta` to an instant.
 _ONE_DAY = timedelta(days=1)
 
 
-def check_availability(clinic_id: str, date: str, service: str) -> dict[str, Any]:
-    """List the appointment start times a clinic can offer on one day.
+def check_availability(
+    clinic_id: str, date: str, service: str, days: int | None = None
+) -> dict[str, Any]:
+    """List the appointment start times a clinic can offer, from a date forward.
 
-    Reads the clinic's configured opening hours for that weekday, drops the
-    day entirely if it is a whole-day closure, generates candidate starts on
-    the clinic's slot grid, and removes any that would overlap an existing
-    appointment. A candidate is offered only if the *whole* service duration
-    fits inside a single opening interval, so a 60-minute consult is never
-    offered at 12:30 against a 13:00 lunch break.
+    For each local date checked, reads the clinic's configured opening hours
+    for that weekday, drops the day entirely if it is a whole-day closure,
+    generates candidate starts on the clinic's slot grid, and removes any
+    that would overlap an existing appointment. A candidate is offered only
+    if the *whole* service duration fits inside a single opening interval, so
+    a 60-minute consult is never offered at 12:30 against a 13:00 lunch
+    break.
+
+    Use `days` to answer "when are you next free?" in one call instead of one
+    call per day -- a clinic that opens Tuesday to Saturday would otherwise
+    need up to seven, and each one is a pause the patient hears.
 
     Nothing is booked or changed by this call.
 
     Args:
         clinic_id: The clinic the caller is talking to. Required; never
             inferred or defaulted.
-        date: The day to check, as ``YYYY-MM-DD``, in the clinic's own
+        date: The first day to check, as ``YYYY-MM-DD``, in the clinic's own
             local calendar (not UTC).
         service: Which service the appointment is for, as either the
             service id or the service name the clinic uses for it. The
             service decides how long the appointment is, so it is required
             even to *look* at availability.
+        days: How many consecutive days to check, counting `date` as the
+            first. Defaults to 1 (just that day); at most 14. Ask for more
+            only when the patient is flexible about the day -- a wide
+            window returns a long list to sift.
 
     Returns:
         A dict with:
-          - ``clinic_id``, ``date`` (``YYYY-MM-DD``), ``timezone`` (IANA).
+          - ``clinic_id``, ``date`` (the first day checked, ``YYYY-MM-DD``),
+            ``days`` (how many were checked), ``timezone`` (IANA).
           - ``service``: ``{"id", "name", "duration_minutes"}`` as the
             clinic defines it -- use ``id`` when booking, ``name`` when
             speaking to the patient.
-          - ``is_open``: whether the clinic opens at all that day.
-          - ``closure_label``: the clinic's own label for the closure
-            (e.g. a public holiday) when the day is closed for that
-            reason, otherwise ``None``. ``is_open`` false with a null
-            label means the clinic simply does not open on that weekday.
-          - ``slots``: a list, earliest first, of
-            ``{"starts_at", "ends_at", "local_start", "local_end"}``.
-            ``starts_at``/``ends_at`` are UTC (``2026-08-27T14:30:00Z``)
-            and are what a booking call takes; ``local_start``/
-            ``local_end`` are ``HH:MM`` in the clinic's own time and are
-            what to say out loud. An empty list with ``is_open`` true
-            means the clinic is open but has nothing free -- which is a
-            different answer from being closed.
+          - ``slots``: every offerable start across the whole window,
+            earliest first, as ``{"date", "starts_at", "ends_at",
+            "local_start", "local_end"}``. ``date`` is the clinic-local day
+            the slot falls on, so a slot is always safe to quote out of the
+            list. ``starts_at``/``ends_at`` are UTC
+            (``2026-08-27T14:30:00Z``) and are what a booking call takes;
+            ``local_start``/``local_end`` are ``HH:MM`` in the clinic's own
+            time and are what to say out loud.
+          - ``days_checked``: one entry per local date in the window, in
+            order, as ``{"date", "is_open", "closure_label",
+            "slot_count"}`` -- which is how to tell a patient *why* a day
+            offers nothing. ``is_open`` false with a ``closure_label`` is a
+            one-off closure (a holiday, staff training) worth naming; false
+            with a null label means the clinic never opens on that weekday;
+            true with ``slot_count`` 0 means it is open but fully booked.
+          - ``is_open`` and ``closure_label``: the first day's, repeated at
+            the top level so the ordinary one-day question reads without
+            indexing into ``days_checked``.
 
     Raises:
         ValidationError: If `clinic_id`, `date`, or `service` is missing or
-            malformed, or if the clinic does not offer that service (the
-            message lists the ones it does).
+            malformed, if `days` is not a whole number between 1 and 14, or
+            if the clinic does not offer that service (the message lists the
+            ones it does).
         NotFoundError: If no clinic exists with that `clinic_id`.
         ConfigurationError: If the clinic's stored availability config is
             unusable (bad timezone, malformed hours). A seeding/deployment
@@ -111,7 +140,14 @@ def check_availability(clinic_id: str, date: str, service: str) -> dict[str, Any
     """
     # Tenant boundary first, before any read (`code-standards.md` -> Python).
     clinic_id = require_clinic_id(clinic_id)
-    local_date = require_date(date, "date")
+    first_date = require_date(date, "date")
+    day_count = require_bounded_int(
+        days,
+        "days",
+        minimum=1,
+        maximum=MAX_AVAILABILITY_DAYS,
+        default=DEFAULT_AVAILABILITY_DAYS,
+    )
 
     clinic = get_clinic(clinic_id)
     zone = clinic_timezone(clinic)
@@ -120,40 +156,93 @@ def check_availability(clinic_id: str, date: str, service: str) -> dict[str, Any
         clinic.get(ClinicAttrs.SLOT_MINUTES), ClinicAttrs.SLOT_MINUTES, clinic_id
     )
 
-    closure_label = _closure_label(clinic, local_date)
-    intervals = (
-        []
-        if closure_label is not None
-        else opening_intervals(clinic, local_date, zone)
-    )
-
-    slots: list[dict[str, str]] = []
-    if intervals:
-        # Only read appointments if the day could offer something: a closed
-        # day costs no query at all.
-        day_start = datetime.combine(local_date, datetime.min.time(), tzinfo=zone)
+    # Resolve the calendar before touching appointments: the query window is
+    # only as wide as the days that could actually offer something, and a
+    # window of entirely closed days costs no query at all.
+    calendar = [
+        _day_plan(clinic, first_date + timedelta(days=offset), zone)
+        for offset in range(day_count)
+    ]
+    open_days = [day for day in calendar if day.intervals]
+    booked: list[tuple[datetime, datetime]] = []
+    if open_days:
+        # One query for the whole window rather than one per day. The
+        # `by-start-time` index is sorted, so a fortnight costs the same
+        # round trip as an afternoon -- which is the point of `days`.
         booked = _booked_spans(
             clinic_id,
-            day_start.astimezone(timezone.utc),
-            (day_start + _ONE_DAY).astimezone(timezone.utc),
+            _local_midnight(open_days[0].date, zone),
+            _local_midnight(open_days[-1].date + _ONE_DAY, zone),
         )
-        slots = _compute_slots(
-            intervals=intervals,
+
+    slots: list[dict[str, str]] = []
+    days_checked: list[dict[str, Any]] = []
+    for day in calendar:
+        day_slots = _compute_slots(
+            intervals=day.intervals,
+            local_date=day.date,
             duration_minutes=service_entry[ServiceAttrs.DURATION_MINUTES],
             slot_minutes=slot_minutes,
             booked=booked,
             zone=zone,
         )
+        slots.extend(day_slots)
+        days_checked.append(
+            {
+                "date": day.date.strftime(DATE_FORMAT),
+                "is_open": bool(day.intervals),
+                "closure_label": day.closure_label,
+                "slot_count": len(day_slots),
+            }
+        )
 
     return {
         CLINIC_ID: clinic_id,
-        "date": local_date.strftime(DATE_FORMAT),
+        "date": first_date.strftime(DATE_FORMAT),
+        "days": day_count,
         ClinicAttrs.TIMEZONE: str(zone),
         "service": service_entry,
-        "is_open": bool(intervals),
-        "closure_label": closure_label,
+        "is_open": days_checked[0]["is_open"],
+        "closure_label": days_checked[0]["closure_label"],
         "slots": slots,
+        "days_checked": days_checked,
     }
+
+
+class _DayPlan(NamedTuple):
+    """One local date's opening intervals, and the reason if it has none."""
+
+    date: date_type
+    intervals: list[tuple[datetime, datetime]]
+    closure_label: str | None
+
+
+def _day_plan(
+    clinic: dict[str, Any], local_date: date_type, zone: ZoneInfo
+) -> _DayPlan:
+    """Resolve one local date to the intervals it can offer, and why not.
+
+    A whole-day closure wins over `hours` (`architecture.md` -> Storage
+    Model), and the two reasons for an empty day stay distinguishable: a
+    closure carries a label, a weekday the clinic never opens does not.
+    """
+    closure_label = _closure_label(clinic, local_date)
+    if closure_label is not None:
+        return _DayPlan(local_date, [], closure_label)
+    return _DayPlan(local_date, opening_intervals(clinic, local_date, zone), None)
+
+
+def _local_midnight(local_date: date_type, zone: ZoneInfo) -> datetime:
+    """The instant a clinic-local calendar day begins, as UTC.
+
+    Always built by combining a *date* with midnight rather than by adding
+    24 hours to the previous day's start: on a DST-transition day the two
+    differ by an hour, and using the latter as a window's end would hide the
+    last hour of a clinic's day from the appointments query.
+    """
+    return datetime.combine(local_date, datetime.min.time(), tzinfo=zone).astimezone(
+        timezone.utc
+    )
 
 
 # --------------------------------------------------------------------------
@@ -520,6 +609,7 @@ def _appointment_span(item: dict[str, Any]) -> tuple[datetime, datetime] | None:
 def _compute_slots(
     *,
     intervals: list[tuple[datetime, datetime]],
+    local_date: date_type,
     duration_minutes: int,
     slot_minutes: int,
     booked: list[tuple[datetime, datetime]],
@@ -533,6 +623,13 @@ def _compute_slots(
     nothing booked. The grid places starts and the duration decides fit,
     which is why `duration_minutes` need not be a multiple of
     `slot_minutes`.
+
+    `local_date` is the day the intervals were built from, stamped onto
+    every slot: with a look-ahead window the returned list mixes days, and
+    a slot that cannot say which day it is on cannot be read out. It comes
+    from the caller rather than from `cursor.astimezone(zone).date()` so
+    that the day a slot is *filed under* is always the day whose `hours`
+    produced it.
     """
     duration = timedelta(minutes=duration_minutes)
     step = timedelta(minutes=slot_minutes)
@@ -546,6 +643,7 @@ def _compute_slots(
             ):
                 slots.append(
                     {
+                        "date": local_date.strftime(DATE_FORMAT),
                         AppointmentAttrs.STARTS_AT: to_iso8601(cursor),
                         AppointmentAttrs.ENDS_AT: to_iso8601(candidate_end),
                         "local_start": cursor.astimezone(zone).strftime(

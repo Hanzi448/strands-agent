@@ -7,24 +7,24 @@ Update this file after every meaningful implementation change.
 - Phase 2: business logic. The AWS sample is vendored as reference
   code, `backend/infra/` synthesises with the four DynamoDB tables
   defined (the other four stacks are still empty), and `backend/tools/`
-  has its foundation plus its **first tool**: `check_availability`
-  reads a clinic's config and its booked appointments and returns
-  offerable slots. The remaining scheduling tools (book, reschedule,
-  cancel) are still to come. `frontend/`, `backend/agents/`,
+  has its foundation plus the **complete availability read surface**:
+  `check_availability` reads a clinic's config and its booked
+  appointments and returns offerable slots, for one day or for a
+  bounded window of up to 14. The scheduling *writes* (book,
+  reschedule, cancel) are still to come — nothing in `backend/tools/`
+  mutates anything yet. `frontend/`, `backend/agents/`,
   `backend/lambda/`, and `seed/` do not exist yet.
 
 ## Current Goal
 
-- Continue the tool functions one at a time. Four open questions were
-  answered by the user on 2026-08-28 and are now written into
-  `architecture.md` (see Open Questions): the `days` look-ahead, the
-  appointment history entry shapes, Cognito guest identities for the
-  voice endpoint, and `us-east-1`. None of them blocks anything now.
-  Next is the small `days` look-ahead on `check_availability`, which
-  finishes the availability *read* surface, then `book_appointment` —
-  the first *write*, and the one that needs patient lookup-or-create
-  by phone. The remaining writes, the agents, the KB bucket, the
-  frontend adapted from the vendored AWS Nova Sonic sample, and the
+- Continue the tool functions one at a time. The availability *read*
+  surface is now final: `check_availability` answers both "is Thursday
+  free?" and "when are you next free?", so the Scheduling sub-agent can
+  be written against a shape that will not move. Next is
+  `book_appointment` — the first *write*, and the one that needs
+  patient lookup-or-create by phone via the `by-phone` index. The
+  remaining writes, the escalation tools, the agents, the KB bucket,
+  the frontend adapted from the vendored AWS Nova Sonic sample, and the
   seed scripts follow.
 
 ## Completed
@@ -160,6 +160,42 @@ Update this file after every meaningful implementation change.
   `ConfigurationError` rather than as wrong slots. Also eyeballed
   end to end against the seeded demo configs.
 
+- **`days` look-ahead on `check_availability`** (Next Up #1). The last
+  change to the availability *read* surface. `check_availability` now
+  takes an optional `days` (default 1, max 14, spec in
+  `architecture.md` -> Storage Model, "Multi-day look-ahead") and walks
+  that many consecutive clinic-local dates, so "when are you next
+  free?" is one tool call rather than up to seven — a voice-latency
+  decision, since every extra round trip is a pause the patient hears.
+  Shape: `slots` stays one flat list, earliest first across the whole
+  window, with each slot now carrying its own local `date`; a new
+  `days_checked` list carries one `{date, is_open, closure_label,
+  slot_count}` entry per day, which is what keeps *closed for a
+  holiday* / *never opens that weekday* / *open but fully booked*
+  three distinguishable answers per day rather than one summary for
+  the window. Top-level `is_open`/`closure_label` remain, mirroring the
+  first day, so the ordinary one-day call reads exactly as before.
+  Two things landed with it, both load-bearing rather than tidying:
+  `validation.require_bounded_int` (a count a *model* chooses, so
+  `None`/`"7"`/`Decimal("7")` are all accepted and out-of-range is a
+  `ValidationError` rather than a silent clamp — quietly answering for
+  14 when it asked for 365 would hide the misunderstanding from it);
+  and `_local_midnight`, which rebuilds each day boundary by combining
+  a *date* with midnight instead of adding 24 hours to the previous
+  one. The old single-day code took the latter shortcut for its window
+  end: across the autumn DST transition that lands an hour short and
+  would hide the last hour of the window's final day from the query.
+  The whole window costs **one** `by-start-time` query, trimmed to the
+  first and last day that could offer anything (a window with no open
+  day queries nothing at all) — which is the reason `days` exists.
+  Verified: `pytest` from `backend/` — **165 passed** (125 before, 40
+  new), including the DST-spanning window, the one-query assertion,
+  per-day closure reasons, cross-day slot ordering, and the bounds.
+  Also eyeballed end to end: a five-day dental window returns Sunday
+  closed with no label, the staff-training Wednesday with its label,
+  and a Monday whose 09:30 start is missing because an appointment
+  holds it.
+
 ## In Progress
 
 - None.
@@ -168,45 +204,40 @@ Update this file after every meaningful implementation change.
 
 The old item 1 ("implement `backend/tools/`") bundled five unrelated
 tool families, which `ai-workflow-rules.md` -> When to Split Work
-forbids in one step. Its foundation and the spec decision that blocked
-the first tool are done (see Completed); the remaining tools are split
-out below, one per unit.
+forbids in one step. Its foundation, the spec decision that blocked the
+first tool, and the whole availability *read* surface are done (see
+Completed); the remaining tools are split out below, one per unit.
 
-1. **`days` look-ahead on `check_availability`** — a small unit, and
-   the last change to the availability *read* surface before the
-   agents depend on it. Bounded `days: int = 1` (max 14), each slot
-   carrying its own local date; spec in `architecture.md` -> Storage
-   Model. Placed before `book_appointment` because it touches the
-   function just written, while its tests and reasoning are still
-   loaded — and because settling the read surface first means the
-   Scheduling sub-agent is written against its final shape.
-2. `book_appointment` — plus the patient lookup-or-create by phone
+1. `book_appointment` — plus the patient lookup-or-create by phone
    (the `by-phone` index) that booking needs to resolve a caller.
    Reuses `scheduling.get_clinic` / `resolve_service` and re-checks the
    requested slot against `check_availability`'s rule rather than
    restating it: a slot offered to a patient can be taken while they
    are still deciding, so the conflict check belongs on the write.
-3. `reschedule_appointment` and `cancel_appointment` — the two writes
+   Note that the availability rule now lives behind `_day_plan` /
+   `_compute_slots` for a *single* date, which is the seam the write
+   should re-use — it must not re-walk `hours`/`closures` itself.
+2. `reschedule_appointment` and `cancel_appointment` — the two writes
    that share the reschedule-history append.
-4. Escalation tools — create, list open, mark resolved.
-5. Build the Orchestrator agent + Scheduling/FAQ/Escalation
+3. Escalation tools — create, list open, mark resolved.
+4. Build the Orchestrator agent + Scheduling/FAQ/Escalation
    sub-agents (Agent-as-Tool pattern), test locally with a text
    interface before wiring voice.
-6. Wire Nova Sonic + BidiAgent voice on top of the working
+5. Wire Nova Sonic + BidiAgent voice on top of the working
    text-agent logic.
-7. Deploy to AgentCore Runtime, verify voice session end-to-end.
-8. Add the Knowledge Base source S3 bucket to the data stack
+6. Deploy to AgentCore Runtime, verify voice session end-to-end.
+7. Add the Knowledge Base source S3 bucket to the data stack
    (`kb/{clinic_id}/` prefixes) and the Bedrock Knowledge Base over it
    in the agent stack — these deploy together, so they are one unit.
    The FAQ query tool lands with them, since it has nothing to query
    until the KB exists.
-9. Build the background Lambda + EventBridge schedule, reusing
+8. Build the background Lambda + EventBridge schedule, reusing
    `backend/tools/` functions.
-10. Build the staff dashboard (Cognito auth, appointment list,
-    escalation queue).
-11. Seed the two demo clinics (dental, cosmetic) with config,
+9. Build the staff dashboard (Cognito auth, appointment list,
+   escalation queue).
+10. Seed the two demo clinics (dental, cosmetic) with config,
     sample appointments, and FAQ documents for the Knowledge Base.
-12. Architecture diagram, README, demo video, submission assets.
+11. Architecture diagram, README, demo video, submission assets.
 
 ## Open Questions
 
@@ -590,3 +621,11 @@ out below, one per unit.
   demo video (must cover problem/audience/why it matters), AWS
   Builder ID, optional live demo link (scores higher), optional
   bonus builder.aws.com post titled with "Agents for Humans".
+
+- **Local day boundaries are built from dates, never from `+ 24h`.**
+  `tools.scheduling._local_midnight` combines a calendar date with
+  midnight in the clinic's zone; adding `timedelta(days=1)` to an aware
+  local midnight gives 23:00 or 01:00 on a DST-transition day. It bit
+  the original single-day query window (an hour short each autumn) and
+  would bite any future code that walks days, so the day boundary has
+  one implementation and a test that spans 2026-10-25.

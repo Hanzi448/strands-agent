@@ -17,6 +17,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -632,3 +633,259 @@ def test_overlap_is_half_open(booked_start, booked_end, expected) -> None:
         )
         is expected
     )
+
+
+# --------------------------------------------------------------------------
+# The `days` look-ahead
+# --------------------------------------------------------------------------
+
+# 2026-07-03 is a Friday, so a three-day window from it covers an ordinary
+# weekday, the clinic's short Saturday, and a Sunday it never opens.
+FRIDAY = "2026-07-03"
+# 2026-07-08 is the Wednesday the dental clinic closes for staff training.
+CLOSURE_WEDNESDAY = "2026-07-08"
+TUESDAY_BEFORE_CLOSURE = "2026-07-07"
+# British Summer Time ends on Sunday 2026-10-25, so this Saturday and the
+# Monday after it are an hour apart in UTC while both open at 09:00 local.
+DST_SATURDAY = "2026-10-24"
+
+
+def dates_checked(result: dict[str, Any]) -> list[str]:
+    return [day["date"] for day in result["days_checked"]]
+
+
+def slots_on(result: dict[str, Any], date: str) -> list[dict[str, Any]]:
+    return [slot for slot in result["slots"] if slot["date"] == date]
+
+
+def query_window(appointments: FakeAppointmentsTable) -> tuple[str, str]:
+    """The `(from, to)` bounds of the by-start-time query that was issued."""
+    expression = appointments.queries[0]["KeyConditionExpression"].get_expression()
+    between = next(
+        sub
+        for sub in expression["values"]
+        if sub.get_expression()["operator"] == "BETWEEN"
+    ).get_expression()
+    return between["values"][1], between["values"][2]
+
+
+def test_days_defaults_to_the_single_day_behaviour(tables) -> None:
+    """Omitting `days` answers for exactly the date asked for."""
+    tables(FakeClinicsTable(dental_clinic()))
+    result = scheduling.check_availability(DENTAL_ID, WEDNESDAY, "checkup")
+
+    assert result["days"] == 1
+    assert dates_checked(result) == [WEDNESDAY]
+    assert {slot["date"] for slot in result["slots"]} == {WEDNESDAY}
+
+
+def test_a_window_walks_consecutive_local_dates(tables) -> None:
+    tables(FakeClinicsTable(dental_clinic()))
+    result = scheduling.check_availability(DENTAL_ID, FRIDAY, "checkup", days=3)
+
+    assert result["days"] == 3
+    assert dates_checked(result) == [FRIDAY, SATURDAY, SUNDAY]
+    # The window's first date stays the top-level `date`.
+    assert result["date"] == FRIDAY
+
+
+def test_each_day_in_the_window_uses_its_own_hours(tables) -> None:
+    """Friday runs to 17:15, Saturday stops at 11:45, Sunday offers nothing."""
+    tables(FakeClinicsTable(dental_clinic()))
+    result = scheduling.check_availability(DENTAL_ID, FRIDAY, "checkup", days=3)
+
+    friday = [slot["local_start"] for slot in slots_on(result, FRIDAY)]
+    saturday = [slot["local_start"] for slot in slots_on(result, SATURDAY)]
+    assert friday[0] == "09:00" and friday[-1] == "17:15"
+    assert saturday[0] == "09:00" and saturday[-1] == "11:45"
+    assert slots_on(result, SUNDAY) == []
+
+
+def test_slots_are_earliest_first_across_the_whole_window(tables) -> None:
+    """One flat list: a model reads the next free time off the front of it."""
+    tables(FakeClinicsTable(dental_clinic()))
+    result = scheduling.check_availability(DENTAL_ID, FRIDAY, "checkup", days=3)
+
+    ordered = [slot["starts_at"] for slot in result["slots"]]
+    assert ordered == sorted(ordered)
+    assert result["slots"][0]["date"] == FRIDAY
+    assert result["slots"][-1]["date"] == SATURDAY
+
+
+def test_every_slot_carries_the_local_date_it_falls_on(tables) -> None:
+    """A slot quoted out of a mixed-day list has to say which day it is.
+
+    Checked against the clinic-local day its own `starts_at` falls on, not
+    against the day it was filed under -- in BST a 09:00 local start is
+    08:00Z, so a slot's UTC date and its local date are not interchangeable.
+    """
+    tables(FakeClinicsTable(dental_clinic()))
+    result = scheduling.check_availability(DENTAL_ID, FRIDAY, "checkup", days=3)
+
+    london = ZoneInfo("Europe/London")
+    assert result["slots"]
+    for slot in result["slots"]:
+        assert set(slot) == {
+            "date",
+            "starts_at",
+            "ends_at",
+            "local_start",
+            "local_end",
+        }
+        local = scheduling.from_iso8601(slot["starts_at"]).astimezone(london)
+        assert slot["date"] == local.strftime("%Y-%m-%d")
+        assert slot["local_start"] == local.strftime("%H:%M")
+
+
+def test_a_closed_day_inside_a_window_reports_why(tables) -> None:
+    """Closed-for-training, never-opens, and fully-booked stay distinguishable."""
+    tables(
+        FakeClinicsTable(dental_clinic()),
+        FakeAppointmentsTable([appointment("2026-07-06T08:00:00Z")]),
+    )
+    result = scheduling.check_availability(
+        DENTAL_ID, TUESDAY_BEFORE_CLOSURE, "checkup", days=2
+    )
+
+    tuesday, wednesday = result["days_checked"]
+    assert tuesday["is_open"] is True and tuesday["slot_count"] > 0
+    assert wednesday["date"] == CLOSURE_WEDNESDAY
+    assert wednesday["is_open"] is False
+    assert wednesday["closure_label"] == "Staff training day"
+    assert wednesday["slot_count"] == 0
+    assert slots_on(result, CLOSURE_WEDNESDAY) == []
+
+
+def test_a_weekday_the_clinic_never_opens_has_no_label(tables) -> None:
+    tables(FakeClinicsTable(dental_clinic()))
+    result = scheduling.check_availability(DENTAL_ID, FRIDAY, "checkup", days=3)
+
+    sunday = result["days_checked"][2]
+    assert sunday["date"] == SUNDAY
+    assert sunday["is_open"] is False
+    assert sunday["closure_label"] is None
+
+
+def test_slot_count_matches_the_slots_returned_for_that_day(tables) -> None:
+    tables(FakeClinicsTable(cosmetic_clinic()))
+    result = scheduling.check_availability(COSMETIC_ID, FRIDAY, "consult", days=3)
+
+    for day in result["days_checked"]:
+        assert day["slot_count"] == len(slots_on(result, day["date"]))
+
+
+def test_the_first_days_status_is_repeated_at_the_top_level(tables) -> None:
+    """`days=1` still reads without indexing into `days_checked`."""
+    tables(FakeClinicsTable(dental_clinic()))
+    result = scheduling.check_availability(
+        DENTAL_ID, CLOSURE_WEDNESDAY, "checkup", days=3
+    )
+
+    assert result["is_open"] is result["days_checked"][0]["is_open"] is False
+    assert (
+        result["closure_label"]
+        == result["days_checked"][0]["closure_label"]
+        == "Staff training day"
+    )
+
+
+# --------------------------------------------------------------------------
+# The look-ahead costs one query, not one per day
+# --------------------------------------------------------------------------
+
+
+def test_a_whole_window_is_one_appointments_query(tables) -> None:
+    """The latency argument for `days` existing at all (`architecture.md`)."""
+    _, appointments = tables(FakeClinicsTable(dental_clinic()))
+    scheduling.check_availability(DENTAL_ID, FRIDAY, "checkup", days=3)
+
+    assert len(appointments.queries) == 1
+    assert query_window(appointments) == (
+        "2026-07-02T23:00:00Z",  # Friday local midnight
+        "2026-07-04T23:00:00Z",  # Sunday local midnight: past Saturday's close
+    )
+
+
+def test_the_window_is_trimmed_to_the_days_that_could_offer_anything(tables) -> None:
+    """A leading Sunday is not queried: the window starts at Monday's midnight."""
+    _, appointments = tables(FakeClinicsTable(dental_clinic()))
+    scheduling.check_availability(DENTAL_ID, SUNDAY, "checkup", days=3)
+
+    assert query_window(appointments) == (
+        "2026-07-05T23:00:00Z",  # Monday local midnight, not Sunday's
+        "2026-07-07T23:00:00Z",  # Wednesday local midnight, past Tuesday
+    )
+
+
+def test_a_window_with_no_open_day_costs_no_query(tables) -> None:
+    """The cosmetic clinic opens Tue-Sat, so Sunday plus Monday is all closed."""
+    _, appointments = tables(FakeClinicsTable(cosmetic_clinic()))
+    result = scheduling.check_availability(COSMETIC_ID, SUNDAY, "consult", days=2)
+
+    assert appointments.queries == []
+    assert result["slots"] == []
+    assert [day["is_open"] for day in result["days_checked"]] == [False, False]
+
+
+def test_one_query_still_blocks_only_the_day_it_falls_on(tables) -> None:
+    """Slots come from one shared span list, so a booking must not leak days."""
+    tables(
+        FakeClinicsTable(dental_clinic()),
+        # 09:00 BST on the Saturday only.
+        FakeAppointmentsTable(
+            [appointment("2026-07-04T08:00:00Z", "2026-07-04T08:15:00Z")]
+        ),
+    )
+    result = scheduling.check_availability(DENTAL_ID, FRIDAY, "checkup", days=3)
+
+    assert "09:00" not in [slot["local_start"] for slot in slots_on(result, SATURDAY)]
+    assert "09:00" in [slot["local_start"] for slot in slots_on(result, FRIDAY)]
+
+
+def test_the_window_end_survives_a_dst_transition_inside_it(tables) -> None:
+    """Local midnight is rebuilt per date, never taken as `start + 24h * n`.
+
+    Across the autumn transition the naive arithmetic lands an hour short,
+    which would hide the last hour of the window's final day.
+    """
+    _, appointments = tables(FakeClinicsTable(dental_clinic()))
+    result = scheduling.check_availability(DENTAL_ID, DST_SATURDAY, "checkup", days=3)
+
+    assert query_window(appointments) == (
+        "2026-10-23T23:00:00Z",  # Saturday local midnight, still BST
+        "2026-10-27T00:00:00Z",  # Tuesday local midnight, now GMT
+    )
+    # Both days open at 09:00 local; only the UTC instant moves.
+    assert slots_on(result, DST_SATURDAY)[0]["starts_at"] == "2026-10-24T08:00:00Z"
+    assert slots_on(result, "2026-10-26")[0]["starts_at"] == "2026-10-26T09:00:00Z"
+
+
+# --------------------------------------------------------------------------
+# `days` bounds
+# --------------------------------------------------------------------------
+
+
+def test_the_maximum_window_is_accepted(tables) -> None:
+    tables(FakeClinicsTable(dental_clinic()))
+    result = scheduling.check_availability(
+        DENTAL_ID, WEDNESDAY, "checkup", days=scheduling.MAX_AVAILABILITY_DAYS
+    )
+    assert len(result["days_checked"]) == scheduling.MAX_AVAILABILITY_DAYS
+
+
+@pytest.mark.parametrize("days", ["7", Decimal("7"), 7])
+def test_days_is_accepted_as_a_string_or_decimal(days, tables) -> None:
+    """A model hands back `"7"`; DynamoDB would hand back a `Decimal`."""
+    tables(FakeClinicsTable(dental_clinic()))
+    result = scheduling.check_availability(DENTAL_ID, WEDNESDAY, "checkup", days=days)
+    assert result["days"] == 7
+
+
+@pytest.mark.parametrize("days", [0, -1, 15, 365, 1.5, "soon", True, [7]])
+def test_an_out_of_range_days_is_rejected_rather_than_clamped(days, tables) -> None:
+    """A model that asked for a year has misunderstood the tool; tell it."""
+    clinics, appointments = tables(FakeClinicsTable(dental_clinic()))
+    with pytest.raises(ValidationError):
+        scheduling.check_availability(DENTAL_ID, WEDNESDAY, "checkup", days=days)
+    assert clinics.requested == []
+    assert appointments.queries == []

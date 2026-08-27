@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from decimal import Decimal
+
 import pytest
 
 from tools.errors import ValidationError
@@ -9,6 +11,7 @@ from tools.schema import AppointmentStatus
 from tools.validation import (
     MAX_IDENTIFIER_LENGTH,
     normalise_phone,
+    require_bounded_int,
     require_clinic_id,
     require_enum,
     require_identifier,
@@ -102,3 +105,28 @@ def test_normalise_phone_converges_on_one_stored_form(spoken, expected) -> None:
 def test_normalise_phone_rejects_implausible_numbers(bad) -> None:
     with pytest.raises(ValidationError):
         normalise_phone(bad)
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [(None, 1), (3, 3), ("3", 3), (" 3 ", 3), (Decimal("3"), 3), (3.0, 3)],
+)
+def test_require_bounded_int_accepts_the_forms_a_count_arrives_in(
+    value, expected
+) -> None:
+    """`None` means "not supplied"; a model sends `"3"`, DynamoDB a `Decimal`."""
+    assert (
+        require_bounded_int(value, "days", minimum=1, maximum=14, default=1) == expected
+    )
+
+
+@pytest.mark.parametrize("value", [0, 15, -1, 1.5, "many", True, None.__class__])
+def test_require_bounded_int_rejects_rather_than_clamping(value) -> None:
+    """Silently answering for 14 would hide the misunderstanding from the model."""
+    with pytest.raises(ValidationError):
+        require_bounded_int(value, "days", minimum=1, maximum=14, default=1)
+
+
+def test_require_bounded_int_error_states_the_range() -> None:
+    with pytest.raises(ValidationError, match="between 1 and 14"):
+        require_bounded_int(365, "days", minimum=1, maximum=14, default=1)

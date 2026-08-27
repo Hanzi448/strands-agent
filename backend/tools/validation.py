@@ -16,6 +16,7 @@ always the normalised string, never whatever the model transcribed.
 from __future__ import annotations
 
 from datetime import date, datetime
+from decimal import Decimal
 from enum import StrEnum
 
 from .errors import ValidationError
@@ -170,6 +171,58 @@ def require_date(value: str | None, field: str) -> date:
             f"{field} must be a calendar date in the form "
             f"{datetime(2026, 1, 1).strftime(DATE_FORMAT)}; got {candidate!r}."
         ) from exc
+
+
+def require_bounded_int(
+    value: object, field: str, *, minimum: int, maximum: int, default: int
+) -> int:
+    """Validate an optional count argument against a hard range.
+
+    Exists for arguments a model *chooses a number for* rather than reads
+    off an item -- a look-ahead length, a page size. Three things follow
+    from that and none of them are defensive padding:
+
+    * `None` means "not supplied" and yields `default`, so a tool can keep
+      a sensible single-unit behaviour when the model omits the argument.
+    * A digit string or a `Decimal` is accepted, because a value can reach
+      a tool as `"7"` from a model or as `Decimal("7")` from DynamoDB.
+    * Out of range is a `ValidationError`, not a silent clamp: a model that
+      asked for 365 has misunderstood the tool, and quietly answering for
+      14 would hide that from it. The message states the range so the
+      retry is informed.
+
+    Args:
+        value: The candidate count, or `None` to take the default.
+        field: Argument name, used in the error message.
+        minimum: Smallest accepted value, inclusive.
+        maximum: Largest accepted value, inclusive.
+        default: Returned when `value` is `None`.
+
+    Returns:
+        The count as an `int`.
+
+    Raises:
+        ValidationError: If it is not a whole number, or is outside
+            `minimum`..`maximum`.
+    """
+    if value is None:
+        return default
+    if isinstance(value, bool) or not isinstance(value, (int, Decimal, float, str)):
+        raise ValidationError(f"{field} must be a whole number; got {value!r}.")
+    try:
+        number = Decimal(str(value).strip())
+    except ArithmeticError as exc:
+        raise ValidationError(
+            f"{field} must be a whole number; got {value!r}."
+        ) from exc
+    if not number.is_finite() or number != number.to_integral_value():
+        raise ValidationError(f"{field} must be a whole number; got {value!r}.")
+    count = int(number)
+    if not minimum <= count <= maximum:
+        raise ValidationError(
+            f"{field} must be between {minimum} and {maximum}; got {count}."
+        )
+    return count
 
 
 def require_enum[E: StrEnum](value: str | E | None, enum_cls: type[E], field: str) -> E:
