@@ -29,6 +29,11 @@ Modules:
         (Invariants #6) -- and its Agent-as-Tool wrapper. It holds
         `create_escalation` alone: the escalation *reads* are staff-only
         and belong to the dashboard, not to a patient-facing agent.
+    voice: the same Orchestrator as a `BidiAgent` over Nova Sonic --
+        speech in, speech out, the same two assistants. It holds no
+        routing rule of its own: the prompt and the tools come from
+        `orchestrator`, and only what the microphone adds is written
+        there. `start_voice_call` is its entry point.
     cli: the local text interface -- `python -m agents.cli <clinic-id>`,
         a keyboard loop over `start_call`. The one module here that is
         not model-facing at all: it is where a real model first reads

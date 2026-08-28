@@ -41,6 +41,8 @@ patient's conversation handed to the next caller.
 
 from __future__ import annotations
 
+from typing import Final
+
 from strands import Agent
 from strands.models.model import Model
 from strands.tools.decorator import DecoratedFunctionTool
@@ -48,6 +50,23 @@ from strands.tools.decorator import DecoratedFunctionTool
 from .escalation_agent import escalation_agent_tool
 from .scheduling_agent import scheduling_agent_tool
 from .session import ClinicSession
+
+# The turn that opens the call. Neither interface's model speaks
+# unprompted -- a Strands `Agent` answers only when it is spoken to, and a
+# `BidiAgent` holds an open connection in silence until it is sent
+# something -- while `project-overview.md` -> Core User Flow has the
+# Orchestrator greet the patient. So something has to prompt the first
+# turn, and it is the same something for the keyboard and for the
+# microphone.
+#
+# It is a stage direction rather than a greeting of our own, which is what
+# keeps the greeting the *model's*: the prompt below tells it to open with
+# the clinic's name, and this is what lets it. It lives here, with the
+# agent that has to be prompted, so both interfaces run the experiment
+# with one string rather than two that drift.
+OPENING_TURN: Final[str] = (
+    "[The patient has just been connected and is waiting for you to speak.]"
+)
 
 ORCHESTRATOR_SYSTEM_PROMPT = """You are the front desk of a single clinic, talking
 to a patient on the telephone. Everything you say is read out loud to them, so

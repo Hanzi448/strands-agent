@@ -3,7 +3,13 @@ boto3>=1.35
 # The agent framework. `backend/agents/` imports it; `backend/tools/` must
 # not, so a Lambda that only mutates data can install without it.
 # AgentCore packages land with the deploy step.
-strands-agents>=1.54
+#
+# The `bidi` extra is the voice layer: `BidiNovaSonicModel` needs
+# `aws-sdk-bedrock-runtime` and the smithy stack, which the base package
+# leaves out. `BidiAgent` itself does not, so `agents/voice.py` imports
+# the Sonic model at call time and everything else here installs and
+# tests without it.
+strands-agents[bidi]>=1.54
 # The IANA timezone database. `zoneinfo` reads the system copy where there
 # is one (Lambda, Linux containers); Windows has none, so a clinic's
 # `timezone` would look misconfigured during local development without it.

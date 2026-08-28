@@ -52,7 +52,7 @@ from strands import Agent
 
 from tools.errors import ToolError
 
-from .orchestrator import start_call
+from .orchestrator import OPENING_TURN, start_call
 
 logger = logging.getLogger(__name__)
 
@@ -65,16 +65,6 @@ logger = logging.getLogger(__name__)
 # settled it belongs in `architecture.md`, and this is the line that
 # reads it.
 MODEL_ENV: Final[str] = "CLINICPILOT_TEXT_MODEL"
-
-# The turn that opens the call. A Strands `Agent` says nothing until it
-# is spoken to, and the Orchestrator's prompt tells it to open with the
-# clinic's name -- so something has to prompt the first turn. Sending a
-# stage direction rather than a greeting of our own is what keeps the
-# greeting the *model's*: this is the experiment the "who speaks the
-# greeting" open question asks for, and `--no-greeting` is its other arm.
-OPENING_TURN: Final[str] = (
-    "[The patient has just been connected and is waiting for you to speak.]"
-)
 
 # What the operator types to hang up. Matched on a whole line only, so a
 # patient turn that happens to contain the word is still a turn.
