@@ -32,7 +32,11 @@ EventBridge, Bedrock, and SES are all pay-per-use managed services.
   (patient-facing voice agent), `scheduling_agent.py`, `faq_agent.py`,
   `escalation_agent.py`. Each sub-agent is wrapped as a `@tool` and
   registered on the orchestrator — sub-agents are never invoked
-  directly by the client.
+  directly by the client. Also `session.py` (the per-session
+  `ClinicSession` every tool is bound to), `results.py` (tool-failure
+  translation), and `cli.py` — the local keyboard interface over
+  `start_call`, which is a *development* entry point, not a deployed
+  one: it prints and reads, and holds no clinic logic of its own.
 - `backend/tools/` — Shared business-logic functions used by the
   agents (appointment CRUD, KB query, notification dispatch). These
   are the **single source of truth** for mutating data — both the

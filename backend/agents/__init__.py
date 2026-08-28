@@ -29,9 +29,12 @@ Modules:
         (Invariants #6) -- and its Agent-as-Tool wrapper. It holds
         `create_escalation` alone: the escalation *reads* are staff-only
         and belong to the dashboard, not to a patient-facing agent.
+    cli: the local text interface -- `python -m agents.cli <clinic-id>`,
+        a keyboard loop over `start_call`. The one module here that is
+        not model-facing at all: it is where a real model first reads
+        these prompts, and where the text model is chosen.
 
-Still to land: `cli` (the local text interface over `start_call`), and
-`faq_agent` (which waits on the Knowledge Base). Until the FAQ sub-agent
-exists, a question about prices or preparation routes to a member of
-staff rather than to an answer.
+Still to land: `faq_agent`, which waits on the Knowledge Base. Until the
+FAQ sub-agent exists, a question about prices or preparation routes to a
+member of staff rather than to an answer.
 """

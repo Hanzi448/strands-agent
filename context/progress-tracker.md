@@ -16,24 +16,29 @@ Update this file after every meaningful implementation change.
 - `backend/agents/` now holds its **foundation** (`session.py`,
   `results.py`), **both patient-facing sub-agents** — Scheduling
   (`scheduling_agent.py`) and Escalation (`escalation_agent.py`) — and
-  the **Orchestrator** (`orchestrator.py`) that routes to them. The
-  agent tree is complete and wired: a patient turn goes in at
+  the **Orchestrator** (`orchestrator.py`) that routes to them, plus the
+  **local text interface** (`cli.py`). The agent tree is complete,
+  wired, and now drivable from a keyboard: a patient turn goes in at
   `start_call`, reaches `backend/tools/`, and comes back out as a
-  sentence. `faq_agent.py` does not exist yet, and neither does
-  `cli.py` — nothing outside a test can yet drive a conversation, which
-  is what makes the text interface the next unit. `frontend/`,
+  printed sentence. `faq_agent.py` does not exist yet. `frontend/`,
   `backend/lambda/` and `seed/` do not exist yet.
+- **Still nothing here has met a real model.** `python -m agents.cli`
+  exists and runs, but running it for real needs credentials and seeded
+  clinics (Next Up #6); against an unconfigured shell it fails as
+  designed, on the way in, naming the cause. So the three system prompts
+  remain unjudged by anything but a script.
 
 ## Current Goal
 
 - **Phase 3: the agents.** The three-agent tree is in — Orchestrator
-  over Scheduling and Escalation — and verified end to end offline.
-  The next unit is the **local text interface** (`python -m agents.cli`)
-  over `start_call`: the first thing that drives a conversation from
-  outside a test, and the only way the prompts get judged by a real
-  model rather than a scripted one. It needs credentials and seeded
-  clinics, so it is the point at which this repo stops being verifiable
-  purely offline. The FAQ sub-agent still waits for the Knowledge Base.
+  over Scheduling and Escalation — verified end to end offline, and now
+  reachable from a keyboard via `python -m agents.cli <clinic-id>`.
+  Phase 3's remaining work is not more agent code: it is **pointing the
+  CLI at something real** (credentials plus seeded clinics, Next Up #6)
+  and then the **voice layer** (Next Up #1), which is where the greeting
+  question and the text-model choice both get settled by observation
+  rather than by argument. The FAQ sub-agent still waits for the
+  Knowledge Base.
   Nothing in `backend/tools/` may move into an agent definition
   (`architecture.md` -> Invariants #3): the agents are a thin
   model-facing surface over functions the background Lambda will call
@@ -628,6 +633,62 @@ Update this file after every meaningful implementation change.
   answering a price question itself is exactly what the next unit
   exists to find out.
 
+- **`backend/agents/cli.py`: the local text interface** (Next Up #1).
+  `python -m agents.cli <clinic-id>`, run from `backend/`: a keyboard
+  loop over `start_call`, printing the Orchestrator's answer and reading
+  the next line. The first thing in this repo that drives a conversation
+  from outside a test.
+  **It holds nothing but the loop.** No clinic logic, no tool call, no
+  prompt text — a rule that lived in this file would be a rule the voice
+  layer does not get (`code-standards.md` → General). Its whole surface
+  is `parse_args`, `take_turn`, `run_call` and `main`, and the agent it
+  drives is built once and kept, because that agent *is* the
+  conversation.
+  **The operator's controls are never turns.** `exit`/`quit` (whole-line
+  match only, so a patient can say the word), Ctrl-D and Ctrl-C hang up
+  without reaching the model; a blank line is a slip and is not sent,
+  since it would spend a model call to say nothing. A patient's
+  "goodbye" is an ordinary turn — what the agent does with it is part of
+  what this interface exists to show.
+  **A failed turn is not a failed call.** The model call is the only
+  thing in the loop that touches a network, so a throttle prints one
+  error line, logs the stack, and leaves the call open with every turn
+  so far still in the agent's `messages`. Dropping the session would
+  throw away exactly the turns that were paid for.
+  **Errors read differently here than in `results.py`, deliberately.**
+  That module hides a `ConfigurationError` because the model has a
+  microphone open; this one prints it in full, attribute path included,
+  because the reader is a developer with a keyboard. Same exception, two
+  audiences, and the contrast is documented in both files.
+  **A credential fault surfaces before the greeting**, since
+  `start_call` reads the clinic row on the way in: `NoRegionError`,
+  `NoCredentialsError` and an unseeded table all exit 1 with the cause
+  named rather than hanging — worth stating because the *voice* stack's
+  known failure mode (Open Questions) is a silent hang on exactly this.
+  **The model is chosen here and only here.** `--model`, defaulting to
+  `$CLINICPILOT_TEXT_MODEL`, threaded straight into `start_call` and so
+  into all three agents. That is the interface layer's decision to make,
+  not an agent definition's. It does **not** settle which model — see
+  the open question, now narrowed to a value.
+  **The greeting question got its experiment, not its answer.** The CLI
+  opens with a stage direction (`OPENING_TURN`) rather than a greeting
+  of our own, so the greeting stays the *model's* and the prompt's
+  instruction is what gets tested; `--no-greeting` runs the other arm.
+  Verified: `pytest` from `backend/` — **544 passed** (511 before, 33
+  new), the pre-existing 511 unchanged. Offline throughout: a `FakeAgent`
+  drives the loop's own behaviour, and the last test runs the real
+  Orchestrator with the Scheduling suite's `ScriptedModel` against fake
+  tables, so a line typed at the prompt is proved to reach
+  `backend/tools/` and come back printed. Also eyeballed as a transcript:
+  greeting, a blank line ignored, an availability question routed and
+  answered, a booking that really wrote one row, and `exit` hanging up.
+  And run for real against an unconfigured shell, which is what produced
+  `!! could not open a call for 'clinic-dental': NoRegionError: You must
+  specify a region.` and exit code 1.
+  **Not verified, and still cannot be**: anything against a real model.
+  That needs Next Up #6 (seeded clinics) plus credentials, and it is the
+  only thing that will judge the three system prompts.
+
 ## In Progress
 
 - None.
@@ -642,20 +703,14 @@ surface, the scheduling write surface, and the escalation tools are all
 in Completed. The only tool still unwritten is the FAQ query, which
 belongs to the Knowledge Base unit below rather than to that item.
 
-1. Build the local **text interface** (`python -m agents.cli`): a
-   small keyboard loop over `start_call(clinic_id)`, printing the
-   Orchestrator's answer and reading the next line. The Orchestrator
-   half of the old item #1 is done; this is its remaining half. It is
-   the first thing here that needs AWS credentials and a real model, so
-   running it for real needs seeded clinics in deployed tables
-   (item #7) — but it is also the only way the three system prompts get
-   judged by a model rather than by a script, so it should not wait for
-   the voice layer. Settle the model open question below while building
-   it: `start_call` already takes the `model` the CLI would pass.
-2. Wire Nova Sonic + BidiAgent voice on top of the working
-   text-agent logic.
-3. Deploy to AgentCore Runtime, verify voice session end-to-end.
-4. Add the Knowledge Base source S3 bucket to the data stack
+1. Wire Nova Sonic + BidiAgent voice on top of the working
+   text-agent logic. Two open questions below are its to settle rather
+   than to inherit: **who speaks the greeting** (the CLI's
+   `OPENING_TURN` is one arm of the experiment; `BidiAgent` may open a
+   session with agent audio of its own, which decides it), and the
+   **text model value**, which by then will have been typed at for real.
+2. Deploy to AgentCore Runtime, verify voice session end-to-end.
+3. Add the Knowledge Base source S3 bucket to the data stack
    (`kb/{clinic_id}/` prefixes) and the Bedrock Knowledge Base over it
    in the agent stack — these deploy together, so they are one unit.
    The FAQ query tool and the FAQ sub-agent land with them, since they
@@ -665,20 +720,20 @@ belongs to the Knowledge Base unit below rather than to that item.
    the staff queue. Correct, and lossy — wiring `faq_agent_tool` into
    `orchestrator_tools` and moving those routes out of the escalation
    paragraph of `ORCHESTRATOR_SYSTEM_PROMPT` is part of this item.
-5. Build the background Lambda + EventBridge schedule, reusing
+4. Build the background Lambda + EventBridge schedule, reusing
    `backend/tools/` functions. Its no-show/reschedule heuristic is not
    specified anywhere yet — per `ai-workflow-rules.md` -> When to Split
    Work that is a spec-then-implement step, not something to invent
    inline. Note the tool it needs already exists:
    `create_escalation(..., source="background")`.
-6. Build the staff dashboard (Cognito auth, appointment list,
+5. Build the staff dashboard (Cognito auth, appointment list,
    escalation queue). Its escalation reads are already written —
    `list_open_escalations`, `get_escalation`, `resolve_escalation`.
-7. Seed the two demo clinics (dental, cosmetic) with config,
+6. Seed the two demo clinics (dental, cosmetic) with config,
    sample appointments, and FAQ documents for the Knowledge Base.
    Settle the phone-number country-code question below first: this is
    the step that fixes a number format.
-8. Architecture diagram, README, demo video, submission assets.
+7. Architecture diagram, README, demo video, submission assets.
 
 ## Open Questions
 
@@ -739,9 +794,17 @@ belongs to the Knowledge Base unit below rather than to that item.
   undecided is the *value*, and whether the Orchestrator should run on
   a cheaper/faster model than the sub-agents — a router that only picks
   between two tools is a different job from one that sequences a
-  booking, and it is the one in the patient's latency path. Nothing is
-  blocked; settle it with Next Up #1, which is the first thing that
-  will actually pay for a model.
+  booking, and it is the one in the patient's latency path.
+  **Narrowed to a value, not a mechanism.** `agents/cli.py` now selects
+  the model — `--model`, defaulting to `$CLINICPILOT_TEXT_MODEL` — and
+  hands it to `start_call`, which threads it into all three agents. So
+  choosing it is the interface layer's job (the voice bridge will make
+  the same call), there is exactly one place to change it, and no agent
+  definition names a model. What is still open is which id to put there,
+  and whether the Orchestrator should run on a cheaper/faster one than
+  its sub-agents — a question that wants a session typed at a real
+  model, which is Next Up #1 plus seeded clinics (#6). Nothing is
+  blocked meanwhile: unset leaves the Strands default.
 
 - **Who speaks the greeting — the interface or the model?**
   `project-overview.md` -> Core User Flow step 2 says the Orchestrator
@@ -756,9 +819,15 @@ belongs to the Knowledge Base unit below rather than to that item.
   `BidiAgent` may open a session with agent audio of its own, which
   would make an interface-composed greeting either redundant or the
   only option. No greeting helper was added to `orchestrator.py` rather
-  than adding one that turns out to be the wrong shape. Settle it in
-  Next Up #2; the text CLI in Next Up #1 can send an opening turn and
-  find out what a real model does with the instruction.
+  than adding one that turns out to be the wrong shape.
+  **The experiment now exists.** `agents/cli.py` opens a call with
+  `OPENING_TURN`, a stage direction ("the patient has just been
+  connected and is waiting for you to speak") rather than a greeting of
+  our own — so the words are the model's and the prompt's instruction is
+  what gets judged. `--no-greeting` runs the other arm, where the
+  operator speaks first and the agent never greets anyone. Still
+  undecided, because the deciding fact is what `BidiAgent` does at the
+  start of a voice session: settle it in Next Up #1.
 
 - **Can a patient ask what they already have booked?**
   `project-overview.md` lists check availability, book, reschedule,
@@ -1173,6 +1242,15 @@ belongs to the Knowledge Base unit below rather than to that item.
   went fine. An exception that escapes a tool is caught by Strands and
   handed to the model as `Error: {type} - {message}` built from the
   traceback, which is the other reason that module catches broadly.
+
+- **`KeyboardInterrupt` is not an `Exception`.** A broad
+  `except Exception` around a model call — which is what keeps a
+  throttled turn from ending a call in `agents/cli.py` — does not catch
+  Ctrl-C, and must not: the two mean opposite things (retry vs hang up).
+  Both are handled separately there, and the test fake that stands in for
+  a failing agent has to raise `BaseException`-typed values for the same
+  reason. Worth remembering for the voice loop, which will have the same
+  shape.
 
 - **`Agent(model=None)` is not "no model"** — it constructs a
   `BedrockModel` on the Strands default id, with no credentials needed
