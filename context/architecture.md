@@ -38,9 +38,15 @@ EventBridge, Bedrock, and SES are all pay-per-use managed services.
   `BidiAgent` over Nova Sonic, plus `start_voice_call` — it holds no
   routing rule of its own: the prompt and the two sub-agent tools come
   from `orchestrator.py`, and only what a microphone adds is written
-  there), and `cli.py` — the local keyboard interface over
-  `start_call`, which is a *development* entry point, not a deployed
-  one: it prints and reads, and holds no clinic logic of its own.
+  there), and the two local interfaces — `cli.py` over `start_call`
+  (keyboard) and `mic.py` over `start_voice_call` (microphone, via
+  `BidiAgent.run` and PyAudio). Both are *development* entry points,
+  not deployed ones: they read, print and time, and hold no clinic
+  logic of their own. `mic.py` is where the model choices are made for
+  a spoken call and where the silence a patient sits in is measured;
+  its PyAudio dependency is in `requirements-dev.txt`, because the
+  deployed path takes audio from a browser over a WebSocket and never
+  opens a sound card.
   The voice agent and the text agent take **two different models**: a
   bidirectional speech model for the call itself, and an ordinary text
   model for the sub-agents, which are plain request-response `Agent`s

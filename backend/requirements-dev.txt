@@ -2,3 +2,12 @@
 # bundle never ships the test runner.
 -r requirements.txt
 pytest>=8.0
+
+# The microphone interface (`agents/mic.py`), which is a development entry
+# point and not a deployed one -- the browser sends audio over a WebSocket,
+# so nothing in AgentCore or a Lambda opens a sound card. `BidiAudioIO` needs
+# PyAudio, and PyAudio needs the PortAudio system library, which is why this
+# is here rather than in requirements.txt. The suite drives a whole call
+# without it (the device is behind `mic.AudioChannels`); this is only needed
+# to actually speak to the agent.
+strands-agents[bidi-pyaudio]>=1.54

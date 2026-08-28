@@ -52,19 +52,17 @@ from strands import Agent
 
 from tools.errors import ToolError
 
-from .orchestrator import OPENING_TURN, start_call
+from .orchestrator import OPENING_TURN, TEXT_MODEL_ENV, start_call
 
 logger = logging.getLogger(__name__)
 
-# Which text model the Orchestrator and both sub-agents reason with.
-# Still an open question in `progress-tracker.md`: `architecture.md` ->
-# Stack names Nova Sonic for the voice layer and nothing for the text
-# agents. Unset means "whatever Strands defaults to", which is a working
-# default and not a decision -- so the value is chosen here, at the
-# interface, rather than baked into an agent definition. When it is
-# settled it belongs in `architecture.md`, and this is the line that
-# reads it.
-MODEL_ENV: Final[str] = "CLINICPILOT_TEXT_MODEL"
+# Which text model the Orchestrator and both sub-agents reason with. The
+# value is chosen here, at the interface, rather than baked into an agent
+# definition -- but the variable's *name* is `orchestrator.py`'s, because
+# the microphone interface reads the same one. Which id belongs in it is
+# still an open question in `progress-tracker.md`; when it is settled it
+# belongs in `architecture.md`, and this is the line that reads it.
+MODEL_ENV: Final[str] = TEXT_MODEL_ENV
 
 # What the operator types to hang up. Matched on a whole line only, so a
 # patient turn that happens to contain the word is still a turn.

@@ -68,6 +68,20 @@ OPENING_TURN: Final[str] = (
     "[The patient has just been connected and is waiting for you to speak.]"
 )
 
+# Which model the text agents in a session reason with -- this one where
+# the patient is typing, and both sub-agents either way. Still an open
+# question in `progress-tracker.md`: `architecture.md` -> Stack names Nova
+# Sonic for the voice layer and nothing for the text agents, and unset
+# means "whatever Strands defaults to", which is a working default and not
+# a decision.
+#
+# The *value* is chosen by an interface -- `cli.py` and `mic.py` both read
+# this and pass it down -- because no agent definition should name a
+# model. The name of the variable lives here, with the agents it
+# configures, for the same reason `OPENING_TURN` does: two interfaces
+# reading two copies of one string is how they drift.
+TEXT_MODEL_ENV: Final[str] = "CLINICPILOT_TEXT_MODEL"
+
 ORCHESTRATOR_SYSTEM_PROMPT = """You are the front desk of a single clinic, talking
 to a patient on the telephone. Everything you say is read out loud to them, so
 speak in short plain sentences, one or two at a time. Never read out an id, a

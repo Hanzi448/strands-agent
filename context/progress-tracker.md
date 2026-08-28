@@ -12,42 +12,46 @@ Update this file after every meaningful implementation change.
   the complete escalation surface. All four tables are written by that
   layer. The one tool still missing is the FAQ query, which has nothing
   to query until the Knowledge Base exists and therefore lands with it
-  (Next Up #3).
+  (Next Up #2).
 - `backend/agents/` now holds its **foundation** (`session.py`,
   `results.py`), **both patient-facing sub-agents** — Scheduling
   (`scheduling_agent.py`) and Escalation (`escalation_agent.py`) — the
-  **Orchestrator** (`orchestrator.py`) that routes to them, the **local
-  text interface** (`cli.py`), and now the **voice layer**
-  (`voice.py`): the same Orchestrator built as a `BidiAgent` over Nova
-  Sonic. The agent tree is complete, wired, drivable from a keyboard,
-  and buildable as a speech agent — a spoken turn goes in at
-  `start_voice_call`, reaches `backend/tools/`, and comes back out as a
-  sentence to say. `faq_agent.py` does not exist yet. `frontend/`,
-  `backend/lambda/` and `seed/` do not exist yet.
-- **Nothing yet drives the voice agent.** `voice.py` builds one; opening
-  a microphone, pumping audio and closing the connection belong to an
-  interface that does not exist (Next Up #1) and to the AgentCore
-  entrypoint (#2). The test suite drives the real `BidiAgent` loop
-  against a scripted speech model, so the wiring is proved; the
-  microphone is not.
-- **Still nothing here has met a real model.** `python -m agents.cli`
-  exists and runs, but running it for real needs credentials and seeded
-  clinics (Next Up #6); against an unconfigured shell it fails as
-  designed, on the way in, naming the cause. So the four system prompts
-  remain unjudged by anything but a script.
+  **Orchestrator** (`orchestrator.py`) that routes to them, the **voice
+  layer** (`voice.py`: the same Orchestrator built as a `BidiAgent` over
+  Nova Sonic), and **both local interfaces** — `cli.py` (keyboard) and
+  `mic.py` (microphone). The agent tree is complete, wired, and drivable
+  two ways: a typed turn or a spoken one goes in, reaches
+  `backend/tools/`, and comes back out as a sentence.
+  `faq_agent.py` does not exist yet. `frontend/`, `backend/lambda/` and
+  `seed/` do not exist yet.
+- **The local half of Phase 3 is finished.** `python -m agents.mic
+  <clinic-id>` opens a Nova Sonic connection, pumps a microphone and
+  speakers through `BidiAgent.run`, prints both sides of the call and
+  times every silence in it. What is left of the voice path is the
+  deployed one: the AgentCore entrypoint (Next Up #1), which is the same
+  `run` call with a WebSocket's channels instead of a sound card.
+- **Still nothing here has met a real model.** Both interfaces exist and
+  run, but running either for real needs credentials and seeded clinics
+  (Next Up #5); against an unconfigured shell they fail as designed, on
+  the way in, naming the cause. So the four system prompts remain
+  unjudged by anything but a script, no audio has been heard, and every
+  latency number `mic.py` was built to print is still unmeasured.
 
 ## Current Goal
 
 - **Phase 3: the agents.** The three-agent tree is in — Orchestrator
-  over Scheduling and Escalation — verified end to end offline,
-  reachable from a keyboard via `python -m agents.cli <clinic-id>`, and
-  now buildable as a Nova Sonic voice agent via `start_voice_call`.
-  Phase 3's remaining work is not more agent code: it is **driving the
-  voice agent** (a microphone interface, Next Up #1), **deploying it**
-  (#2), and **pointing either interface at something real** (credentials
-  plus seeded clinics, #6). That is where the greeting question and the
-  text-model choice get settled by observation rather than by argument.
-  The FAQ sub-agent still waits for the Knowledge Base.
+  over Scheduling and Escalation — verified end to end offline, and
+  reachable two ways: `python -m agents.cli <clinic-id>` from a keyboard
+  and `python -m agents.mic <clinic-id>` from a microphone. Phase 3's
+  remaining work is not more agent code and no longer any local
+  plumbing: it is **deploying the voice agent** (Next Up #1) and
+  **pointing either interface at something real** (credentials plus
+  seeded clinics, #5). That second one is now the bottleneck for three
+  open questions at once — who greets the patient and what it costs in
+  dead air, which voice each clinic answers in, and which text model the
+  sub-agents reason with — all of which are answered by listening to one
+  call rather than by argument. The FAQ sub-agent still waits for the
+  Knowledge Base.
   Nothing in `backend/tools/` may move into an agent definition
   (`architecture.md` -> Invariants #3): the agents are a thin
   model-facing surface over functions the background Lambda will call
@@ -695,7 +699,7 @@ Update this file after every meaningful implementation change.
   `!! could not open a call for 'clinic-dental': NoRegionError: You must
   specify a region.` and exit code 1.
   **Not verified, and still cannot be**: anything against a real model.
-  That needs Next Up #6 (seeded clinics) plus credentials, and it is the
+  That needs Next Up #5 (seeded clinics) plus credentials, and it is the
   only thing that will judge the three system prompts.
 
 - **`backend/agents/voice.py`: Nova Sonic + `BidiAgent`** (Next Up #1,
@@ -786,7 +790,81 @@ Update this file after every meaningful implementation change.
   **Not verified, and cannot be yet**: audio. Nothing has opened a
   Bedrock bidirectional stream, nobody has heard the agent speak, and
   the greeting question's deciding fact — what a real session sounds
-  like in its first second — needs Next Up #1 and #6.
+  like in its first second — needs the microphone interface (now built,
+  below) pointed at credentials and a seeded clinic (Next Up #5).
+
+- **`backend/agents/mic.py`: the local microphone interface** (Next Up
+  #1). The voice counterpart of `cli.py` and the second half of the old
+  item 1: `start_voice_call` builds the agent, and this drives it —
+  `BidiAgent.run` with `BidiAudioIO`'s microphone and speakers, plus a
+  monitor that prints what went past and times the silences. One module,
+  a 33-test suite, and one dev dependency.
+  **It holds no clinic logic, no prompt text and no tool call**, exactly
+  as `cli.py` holds none: it builds, pumps, prints and times. A rule
+  written here would be a rule the deployed WebSocket entrypoint (#1)
+  does not get.
+  **The greeting is sent from an IO channel, because `run` gives no
+  other hook.** `BidiAgent.run` owns the connection — it starts the
+  agent, then starts each channel, then pumps — so `_Greeting.start` is
+  the only point between "the connection is open" and "the patient is
+  being listened to". The channel blocks forever afterwards, since `run`
+  reads every input in a loop and one that yielded twice would talk over
+  the patient's first sentence. What it sends is `voice.greet`, the same
+  stage direction the keyboard sends; `--no-greeting` runs the other arm.
+  **It measures the thing the greeting question is actually about.** A
+  `Silence` timer is marked when the greeting is sent and again at every
+  final *patient* transcript, and read at the first audio frame of the
+  answer — so each turn prints `greeting: first audio after 1.4s` or
+  `reply: first audio after 0.9s`. One mark at a time, cleared on
+  reading, so the second audio frame of an answer measures nothing.
+  Assistant calls are timed separately (`<- scheduling_assistant success
+  in 3.1s`), because "was that the speech model or was that a booking?"
+  is the first question anyone asks about a pause.
+  **The monitor prints what was *heard*.** Final transcripts on both
+  sides (`you>` / `clinic>`), which assistant a call was routed to, and
+  connection start/restart/close/interruption/error — a developer with a
+  headset can hear the call but cannot see that the model wrote the
+  phone number down wrong. Interim transcripts, assistant answers and
+  token usage are `--verbose` only. Nothing it prints is sent to the
+  model: it is an output channel beside the speakers, not instead of
+  them.
+  **PyAudio is behind a seam, and in `requirements-dev.txt`.**
+  `build_audio_io` is the only thing that imports `BidiAudioIO`, and it
+  does so at call time; `run_call` takes an `AudioChannels` protocol, so
+  a whole call is drivable with no sound card and no PortAudio. That is
+  what the test suite does. The dependency is a *dev* one because the
+  deployed path takes audio from a browser over a WebSocket and never
+  opens a device — a missing one is reported with the install command
+  rather than raised as a traceback.
+  **`TEXT_MODEL_ENV` moved to `orchestrator.py`**, for the same reason
+  `OPENING_TURN` did in the previous unit: two interfaces now choose the
+  sub-agents' text model and one env-var name spelled twice is how they
+  drift. `cli.py` keeps `MODEL_ENV` as the alias it already exported.
+  **Nothing was invented about hanging up.** Ctrl-C, and nothing else —
+  a patient saying "goodbye" is an ordinary turn here, as it is over the
+  keyboard. The open question below is unchanged and still matters
+  before #1.
+  **Dependency added**: `strands-agents[bidi-pyaudio]>=1.54` in
+  `backend/requirements-dev.txt`, with a comment on why it is not in
+  `requirements.txt`.
+  Verified: `pytest` from `backend/` — **605 passed** (572 before, 33
+  new), the pre-existing 572 unchanged. Whole calls are driven through
+  the real `BidiAgent.run` — real task group, real channel start/stop,
+  real tool executor — against a `HangingUpBidiModel` (the suite's
+  `ScriptedBidiModel`, plus a connection close when its script runs out,
+  which is what lets a test end without cancelling a task group
+  mid-flight) and a `FakeAudioIO` standing where the sound card will.
+  Pinned: the greeting is sent exactly once and only with `greeting=True`,
+  what the microphone says reaches the model, both devices are started
+  and stopped with the call, and the module imports without PyAudio
+  present. `python -m agents.mic --help` and the no-audio path were both
+  run for real.
+  **Not verified, and still cannot be**: audio. No Bedrock bidirectional
+  stream has been opened, nobody has heard the agent speak, and every
+  number this module was built to print is still unmeasured. That needs
+  credentials and a seeded clinic (#5) — at which point the greeting
+  question, the voice choice and the text-model value are all settled by
+  listening rather than by argument.
 
 ## In Progress
 
@@ -794,25 +872,15 @@ Update this file after every meaningful implementation change.
 
 ## Next Up
 
-The old item 1 ("implement `backend/tools/`") bundled five unrelated
-tool families, which `ai-workflow-rules.md` -> When to Split Work
-forbids in one step. It is now **fully discharged**: the foundation,
-the spec decision that blocked the first tool, the availability read
-surface, the scheduling write surface, and the escalation tools are all
-in Completed. The only tool still unwritten is the FAQ query, which
-belongs to the Knowledge Base unit below rather than to that item.
+Both halves of the old "drive the voice agent" item are now in
+Completed: `voice.py` builds the speech agent and `mic.py` drives it
+from a microphone. Nothing local is left unbuilt — what remains needs
+AWS resources that do not exist yet, which is why **#5 (seed) unblocks
+more than its position suggests**: it is what turns `mic.py` from a
+program that runs into a call someone can listen to, and it is where
+the greeting, voice and text-model questions get answered.
 
-1. Drive the voice agent locally: a microphone interface over
-   `start_voice_call`, the counterpart of `cli.py`. `BidiAgent.run`
-   takes IO channels and `strands.experimental.bidi.BidiAudioIO` is one
-   (PyAudio, the `bidi-pyaudio` extra), so this is an interface module
-   and no agent code. **Split from the old item 1**, whose first half —
-   the `BidiAgent` wiring itself — is in Completed. It needs credentials
-   and a seeded clinic to say anything, so it lands with or after #6.
-   This is the arm that settles **who speaks the greeting**: `greet`
-   sends `OPENING_TURN` and the question is what that actually sounds
-   like against a live session.
-2. Deploy to AgentCore Runtime, verify voice session end-to-end. The
+1. Deploy to AgentCore Runtime, verify voice session end-to-end. The
    sample's `agent/strands_agent.py` is the reference shape: a FastAPI
    `/ws` endpoint calling `BidiAgent.run` with the WebSocket's
    `receive_json`/`send_json` as its IO channels, plus the `/ping`
@@ -820,7 +888,7 @@ belongs to the Knowledge Base unit below rather than to that item.
    matters — the clinic is chosen when the session opens, so the
    handler reads it from the connection and calls `start_voice_call`,
    never taking it from anything the patient says.
-3. Add the Knowledge Base source S3 bucket to the data stack
+2. Add the Knowledge Base source S3 bucket to the data stack
    (`kb/{clinic_id}/` prefixes) and the Bedrock Knowledge Base over it
    in the agent stack — these deploy together, so they are one unit.
    The FAQ query tool and the FAQ sub-agent land with them, since they
@@ -830,20 +898,20 @@ belongs to the Knowledge Base unit below rather than to that item.
    the staff queue. Correct, and lossy — wiring `faq_agent_tool` into
    `orchestrator_tools` and moving those routes out of the escalation
    paragraph of `ORCHESTRATOR_SYSTEM_PROMPT` is part of this item.
-4. Build the background Lambda + EventBridge schedule, reusing
+3. Build the background Lambda + EventBridge schedule, reusing
    `backend/tools/` functions. Its no-show/reschedule heuristic is not
    specified anywhere yet — per `ai-workflow-rules.md` -> When to Split
    Work that is a spec-then-implement step, not something to invent
    inline. Note the tool it needs already exists:
    `create_escalation(..., source="background")`.
-5. Build the staff dashboard (Cognito auth, appointment list,
+4. Build the staff dashboard (Cognito auth, appointment list,
    escalation queue). Its escalation reads are already written —
    `list_open_escalations`, `get_escalation`, `resolve_escalation`.
-6. Seed the two demo clinics (dental, cosmetic) with config,
+5. Seed the two demo clinics (dental, cosmetic) with config,
    sample appointments, and FAQ documents for the Knowledge Base.
    Settle the phone-number country-code question below first: this is
    the step that fixes a number format.
-7. Architecture diagram, README, demo video, submission assets.
+6. Architecture diagram, README, demo video, submission assets.
 
 ## Open Questions
 
@@ -913,7 +981,7 @@ belongs to the Knowledge Base unit below rather than to that item.
   definition names a model. What is still open is which id to put there,
   and whether the Orchestrator should run on a cheaper/faster one than
   its sub-agents — a question that wants a session typed at a real
-  model, which is Next Up #1 plus seeded clinics (#6). Nothing is
+  model, which needs seeded clinics (Next Up #5). Nothing is
   blocked meanwhile: unset leaves the Strands default.
   **The voice layer narrows it further, and shrinks it.** Over a
   microphone the Orchestrator is Nova Sonic, so this question is no
@@ -922,6 +990,12 @@ belongs to the Knowledge Base unit below rather than to that item.
   read the text one. What is left to decide is one id for the two
   assistants, plus (for the typed interface only) whether the text
   Orchestrator runs on something cheaper than they do.
+  **Both interfaces now read one variable.** `mic.py --model` selects
+  the sub-agents' model exactly as `cli.py --model` does, and the name
+  they read — `TEXT_MODEL_ENV` — moved to `orchestrator.py` so it is
+  spelled once. Deciding the value is still one line in one place; what
+  it now also needs is a spoken call, because latency behind a
+  microphone is the half of the question a typed session cannot show.
 
 - **Who speaks the greeting — the interface or the model?**
   `project-overview.md` -> Core User Flow step 2 says the Orchestrator
@@ -944,7 +1018,7 @@ belongs to the Knowledge Base unit below rather than to that item.
   what gets judged. `--no-greeting` runs the other arm, where the
   operator speaks first and the agent never greets anyone. Still
   undecided, because the deciding fact is what `BidiAgent` does at the
-  start of a voice session: settle it in Next Up #1.
+  start of a voice session: settle it against a live one.
   **Half answered by the code, not yet by a call.** A `BidiAgent` does
   not open with audio of its own: it holds the connection open in
   silence until something is sent to it (`agent/loop.py` — the model
@@ -954,7 +1028,10 @@ belongs to the Knowledge Base unit below rather than to that item.
   `OPENING_TURN` moved to `orchestrator.py` so both interfaces send one
   string. What is still open is the *cost* — how long a patient hears
   nothing while a speech model composes a greeting — and that is
-  audible only in Next Up #1.
+  audible only against a live session. `mic.py` now *prints* that
+  number every turn (`greeting: first audio after 1.4s`), so what the
+  question waits on is no longer an interface but credentials and a
+  seeded clinic (Next Up #5).
 
 - **How does a voice call end?** `project-overview.md` describes a
   session that begins and a patient who is told staff will follow up,
@@ -972,8 +1049,17 @@ belongs to the Knowledge Base unit below rather than to that item.
   The candidates are a hang-up tool the model calls when the patient
   says goodbye, and a browser control that closes the connection —
   possibly both, since a patient who walks away never says goodbye. It
-  matters before Next Up #2, since a deployed session that never closes
+  matters before Next Up #1, since a deployed session that never closes
   is a meter left running.
+  **`mic.py` deliberately does not answer it.** Locally the operator
+  presses Ctrl-C, exactly as they type `exit` over the keyboard, and
+  `BidiAgent.run` closes the connection and both devices on its way out.
+  A patient saying "goodbye" is still an ordinary turn. That works
+  because a person is sitting at the process; nothing about it carries
+  to a browser tab that was closed, which is the case the question is
+  actually about. What the interface *does* add is that a closed or
+  restarted connection now prints a line, so whichever answer is chosen
+  can be watched working.
 
 - **Which Nova Sonic voice does each clinic answer in?** Nova Sonic
   offers a small set (`matthew`, `tiffany`); `$CLINICPILOT_VOICE_ID`
@@ -1026,7 +1112,7 @@ belongs to the Knowledge Base unit below rather than to that item.
   a no-op, which the dashboard can absorb by treating `conflict` on
   this call as success. Reversible: one branch, one message, and the
   tests that pin it are named for the behaviour. If the dashboard would
-  rather have it idempotent, say so before Next Up #5 is built.
+  rather have it idempotent, say so before Next Up #4 is built.
 
 - **What bounds the escalation queue read?** `list_open_escalations`
   takes an optional `limit`, defaulting to 50 and capped at 100
