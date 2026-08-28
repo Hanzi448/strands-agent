@@ -13,25 +13,27 @@ Update this file after every meaningful implementation change.
   layer. The one tool still missing is the FAQ query, which has nothing
   to query until the Knowledge Base exists and therefore lands with it
   (Next Up #4).
-- `backend/agents/` now exists with its **foundation**
-  (`session.py`, `results.py`) and **both patient-facing sub-agents**:
-  Scheduling (`scheduling_agent.py`) and Escalation
-  (`escalation_agent.py`). Every write the tool layer offers a patient
-  call is now reachable through a model. `orchestrator.py` and
-  `faq_agent.py` do not exist yet — and until the Orchestrator lands,
-  nothing calls either sub-agent, which is exactly what makes it the
-  next unit. `frontend/`, `backend/lambda/` and `seed/` do not exist
-  yet.
+- `backend/agents/` now holds its **foundation** (`session.py`,
+  `results.py`), **both patient-facing sub-agents** — Scheduling
+  (`scheduling_agent.py`) and Escalation (`escalation_agent.py`) — and
+  the **Orchestrator** (`orchestrator.py`) that routes to them. The
+  agent tree is complete and wired: a patient turn goes in at
+  `start_call`, reaches `backend/tools/`, and comes back out as a
+  sentence. `faq_agent.py` does not exist yet, and neither does
+  `cli.py` — nothing outside a test can yet drive a conversation, which
+  is what makes the text interface the next unit. `frontend/`,
+  `backend/lambda/` and `seed/` do not exist yet.
 
 ## Current Goal
 
-- **Phase 3: the agents.** Both sub-agents are in. The next unit is
-  the **Orchestrator** — greeting, intent, and routing to the two
-  Agent-as-Tool wrappers that now exist. It is what makes the
-  sub-agents reachable at all (`architecture.md` -> Invariants #2),
-  and it is the first thing in this repo worth talking to, so the
-  local text interface (`python -m agents.cli`) belongs with it. The
-  FAQ sub-agent still waits for the Knowledge Base.
+- **Phase 3: the agents.** The three-agent tree is in — Orchestrator
+  over Scheduling and Escalation — and verified end to end offline.
+  The next unit is the **local text interface** (`python -m agents.cli`)
+  over `start_call`: the first thing that drives a conversation from
+  outside a test, and the only way the prompts get judged by a real
+  model rather than a scripted one. It needs credentials and seeded
+  clinics, so it is the point at which this repo stops being verifiable
+  purely offline. The FAQ sub-agent still waits for the Knowledge Base.
   Nothing in `backend/tools/` may move into an agent definition
   (`architecture.md` -> Invariants #3): the agents are a thin
   model-facing surface over functions the background Lambda will call
@@ -544,6 +546,88 @@ Update this file after every meaningful implementation change.
   and whether the prompt's "once, and once only" actually stops a
   duplicate queue card. Both need the Orchestrator and seeded clinics.
 
+- **The Orchestrator** (`backend/agents/orchestrator.py`, Next Up #1,
+  first half). The agent a patient actually talks to, and the thing
+  that makes the two sub-agents reachable at all
+  (`architecture.md` -> Invariants #2). One module, a 37-test suite.
+  **Split from Next Up #1**, which bundled the Orchestrator with the
+  local text interface. Same reasoning as the sub-agent split before
+  it (`ai-workflow-rules.md` -> When to Split Work): the Orchestrator
+  is verifiable end to end offline against scripted models, and the
+  CLI is the first thing in this repo that cannot be — it needs
+  credentials and seeded clinics. Bundling them would have made the
+  verifiable half wait on the unverifiable one.
+  **Its whole tool surface is the two sub-agents.** No
+  `backend/tools/` function is reachable from it, so there is no path
+  by which the front desk books an appointment or writes an escalation
+  without an assistant in between — the appointment rules stay in one
+  place (Invariants #3) and this module stays about routing rather
+  than about diaries. The suite names `check_availability`,
+  `book_appointment`, `reschedule_appointment`, `cancel_appointment`,
+  `create_escalation` and `find_upcoming_appointments` individually, so
+  wiring any of them up fails a test that says why.
+  **It is the only agent in this package that remembers anything.** A
+  sub-agent is rebuilt per call and keeps no conversation; the
+  Orchestrator is built once per session and accumulates `messages`.
+  That is the division of labour the Agent-as-Tool pattern buys: the
+  patient's thread of talk in one place, and the multi-turn dance a
+  booking takes kept out of it. Both halves are asserted in one test
+  run — the front desk sees 1, 3 then 5 messages while the scheduling
+  assistant sees 1 and 1.
+  **One `model` parameter threads through all three agents.**
+  `build_orchestrator(session, model)` passes the same model into both
+  sub-agent wrappers, so a session cannot end up half on one model and
+  half on another. This does not settle the open question below about
+  *which* text model — it makes sure there is one place to settle it.
+  **`start_call(clinic_id)` is the single entry point** for anything
+  driving a conversation (the CLI next, the voice bridge later), so no
+  caller constructs a `ClinicSession` by hand and skips the checks
+  `ClinicSession.start` runs. A missing clinic id, an unknown clinic or
+  an unresolvable timezone fails there, before the greeting, rather
+  than inside the patient's first booking.
+  **The prompt's job is to stop it talking.** A fluent model at a front
+  desk will invent an opening time or a price because it sounds
+  helpful, so the prompt says in as many words that anything it tells
+  the patient about the diary, prices, treatments or policies must have
+  come back from an assistant in this conversation. It also carries the
+  two honesty rules the layer below cannot enforce: never confirm a
+  booking the scheduling assistant did not report doing, and if the
+  escalation assistant could not record something, do not promise a
+  callback. `session.describe()` gives it the clinic's name, local date
+  and services — enough to ask "which treatment?" and no more.
+  **What is not an escalation is stated as explicitly as what is.** A
+  taken slot, a name that does not match the number, a day the clinic
+  is closed: things the patient can settle, and a queue full of them is
+  a queue where the cards that need a person are lost.
+  **`callback_handler=None` here too**, for a different reason than the
+  sub-agents': its output *is* the patient's answer, but rendering it
+  belongs to the interface layer. Strands' default handler prints every
+  token and tool call to stdout, which in AgentCore is CloudWatch — a
+  whole call including the patient's name and phone number.
+  Verified: `pytest` from `backend/` — **511 passed** (474 before, 37
+  new), the pre-existing 474 unchanged; nothing outside
+  `backend/agents/` was touched (`orchestrator.py` added,
+  `agents/__init__.py`'s module list updated). Offline throughout: one
+  `ScriptedModel` (the Scheduling suite's) stands in for all three
+  agents, so its script is the turns of the whole tree interleaved in
+  the order they actually run and a routing change shows up as a script
+  that no longer fits. Four whole calls are driven end to end — a
+  booking that reaches the appointments table, a refund question that
+  reaches the escalation queue *and leaves the diary untouched*, a
+  cross-clinic call that reaches only `clinic-cosmetic`, and a broken
+  clinic config whose attribute path never gets past `results.py`.
+  Every fake and fixture is imported from the suite that owns it. Three
+  guards were mutation-checked: leaking a tool-layer function onto the
+  front desk and dropping the model threading each fail the tests that
+  name them; skipping `ClinicSession.start` in `start_call` turned out
+  to be behaviourally equivalent (the timezone fault still surfaces via
+  `describe()` at build time), so that is a real equivalence rather
+  than an untested gap.
+  **Not verified, and cannot be yet**: anything against a real model.
+  Whether the routing prompt actually keeps a fluent model from
+  answering a price question itself is exactly what the next unit
+  exists to find out.
+
 ## In Progress
 
 - None.
@@ -558,13 +642,16 @@ surface, the scheduling write surface, and the escalation tools are all
 in Completed. The only tool still unwritten is the FAQ query, which
 belongs to the Knowledge Base unit below rather than to that item.
 
-1. Build the **Orchestrator** (`agents/orchestrator.py`): greeting,
-   intent, and routing to `scheduling_agent_tool` and
-   `escalation_agent_tool`, both of which now exist. This is what makes
-   the sub-agents reachable, so the local **text interface** belongs
-   here — a small `python -m agents.cli` driving one clinic by
-   keyboard. Needs a real model and seeded data, so it may have to
-   follow items #2/#3 to be run for real rather than only constructed.
+1. Build the local **text interface** (`python -m agents.cli`): a
+   small keyboard loop over `start_call(clinic_id)`, printing the
+   Orchestrator's answer and reading the next line. The Orchestrator
+   half of the old item #1 is done; this is its remaining half. It is
+   the first thing here that needs AWS credentials and a real model, so
+   running it for real needs seeded clinics in deployed tables
+   (item #7) — but it is also the only way the three system prompts get
+   judged by a model rather than by a script, so it should not wait for
+   the voice layer. Settle the model open question below while building
+   it: `start_call` already takes the `model` the CLI would pass.
 2. Wire Nova Sonic + BidiAgent voice on top of the working
    text-agent logic.
 3. Deploy to AgentCore Runtime, verify voice session end-to-end.
@@ -572,7 +659,12 @@ belongs to the Knowledge Base unit below rather than to that item.
    (`kb/{clinic_id}/` prefixes) and the Bedrock Knowledge Base over it
    in the agent stack — these deploy together, so they are one unit.
    The FAQ query tool and the FAQ sub-agent land with them, since they
-   have nothing to query until the KB exists.
+   have nothing to query until the KB exists. Note what the gap costs
+   today: the Orchestrator's only route for a price or preparation
+   question is `escalation_assistant`, so every FAQ becomes a card in
+   the staff queue. Correct, and lossy — wiring `faq_agent_tool` into
+   `orchestrator_tools` and moving those routes out of the escalation
+   paragraph of `ORCHESTRATOR_SYSTEM_PROMPT` is part of this item.
 5. Build the background Lambda + EventBridge schedule, reusing
    `backend/tools/` functions. Its no-show/reschedule heuristic is not
    specified anywhere yet — per `ai-workflow-rules.md` -> When to Split
@@ -639,9 +731,34 @@ belongs to the Knowledge Base unit below rather than to that item.
   optional `model` and pass `None` by default, which leaves the Strands
   default (today `global.anthropic.claude-sonnet-4-6` on Bedrock). That
   is a working default, not a decision — it needs one row in
-  `architecture.md` -> Stack and one place to configure it, before the
-  Orchestrator makes three agents inherit it silently. Two of the three
-  now do. Blocking nothing; wrong to leave implicit past Next Up #1.
+  `architecture.md` -> Stack and one place to configure it.
+  **The one place now exists**: `build_orchestrator` threads a single
+  `model` into both sub-agents and `start_call` takes it, so all three
+  agents in a session run on whatever that one argument says, and there
+  is exactly one line to change when it is settled. What is still
+  undecided is the *value*, and whether the Orchestrator should run on
+  a cheaper/faster model than the sub-agents — a router that only picks
+  between two tools is a different job from one that sequences a
+  booking, and it is the one in the patient's latency path. Nothing is
+  blocked; settle it with Next Up #1, which is the first thing that
+  will actually pay for a model.
+
+- **Who speaks the greeting — the interface or the model?**
+  `project-overview.md` -> Core User Flow step 2 says the Orchestrator
+  greets the patient, and it does: the system prompt tells it to open
+  with the clinic's name and ask what it can do. But a Strands `Agent`
+  says nothing until it is spoken to, so *something* has to prompt the
+  first turn, and the two candidates behave differently. A fixed
+  greeting string composed by the interface layer is instant and cannot
+  hallucinate the clinic's name; a model-generated one costs a round
+  trip of silence before the patient hears anything. Not decided here,
+  because it is genuinely the voice layer's question: Nova Sonic's
+  `BidiAgent` may open a session with agent audio of its own, which
+  would make an interface-composed greeting either redundant or the
+  only option. No greeting helper was added to `orchestrator.py` rather
+  than adding one that turns out to be the wrong shape. Settle it in
+  Next Up #2; the text CLI in Next Up #1 can send an opening turn and
+  find out what a real model does with the instruction.
 
 - **Can a patient ask what they already have booked?**
   `project-overview.md` lists check availability, book, reschedule,

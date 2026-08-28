@@ -16,6 +16,11 @@ Modules:
     session: the per-session `ClinicSession`. The only route a `clinic_id`
         takes into a tool call, and the reason no tool here has one as a
         parameter.
+    orchestrator: the patient-facing agent -- greeting, intent, routing --
+        and `start_call`, the one entry point anything driving a
+        conversation should use. It holds the two sub-agents and no tool
+        of its own, and it is the only agent here that keeps a
+        conversation across turns.
     results: turning a `tools.errors.ToolError` into something a model can
         act on -- and keeping a broken deployment out of a patient's ear.
     scheduling_agent: the Scheduling sub-agent -- availability, booking,
@@ -25,6 +30,8 @@ Modules:
         `create_escalation` alone: the escalation *reads* are staff-only
         and belong to the dashboard, not to a patient-facing agent.
 
-Still to land: `orchestrator`, and `faq_agent` (which waits on the
-Knowledge Base).
+Still to land: `cli` (the local text interface over `start_call`), and
+`faq_agent` (which waits on the Knowledge Base). Until the FAQ sub-agent
+exists, a question about prices or preparation routes to a member of
+staff rather than to an answer.
 """
