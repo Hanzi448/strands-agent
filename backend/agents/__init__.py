@@ -38,6 +38,13 @@ Modules:
         a keyboard loop over `start_call`. The one module here that is
         not model-facing at all: it is where a real model first reads
         these prompts, and where the text model is chosen.
+    mic: the local microphone interface -- `python -m agents.mic
+        <clinic-id>`, `BidiAgent.run` over a sound card. A development
+        entry point, like `cli`, over `start_voice_call` instead.
+    agentcore_app: the deployed voice entrypoint -- a FastAPI `/ws` and
+        `/ping` over `start_voice_call`, shaped for Bedrock AgentCore
+        Runtime. The one interface here a patient's own browser reaches;
+        `cli` and `mic` are for development only.
 
 Still to land: `faq_agent`, which waits on the Knowledge Base. Until the
 FAQ sub-agent exists, a question about prices or preparation routes to a

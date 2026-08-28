@@ -26,11 +26,12 @@ lines are the point of this module, not decoration.
 
 **The greeting is sent from an IO channel, because that is the only hook
 `run` gives.** `BidiAgent.run` owns the connection: it starts the agent,
-then starts each channel, then begins pumping. `_Greeting.start` is
+then starts each channel, then begins pumping. `voice.Greeting.start` is
 therefore the one place a first turn can be sent after the connection is
-open and before the patient is listened to. The turn itself is
-`voice.greet` -- the same stage direction the keyboard sends, not a
-second one written here.
+open and before the patient is listened to. It is `voice.py`'s, not this
+module's -- shared with the AgentCore entrypoint so both send the same
+stage direction rather than two that could drift. This module's own
+addition is the timing callback, not the channel itself.
 
 **How a call ends.** Ctrl-C, and nothing else. Nova Sonic caps a
 connection at eight minutes and `BidiAgentLoop` silently restarts it, so
@@ -64,7 +65,7 @@ import sys
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Final, NoReturn, Protocol, TextIO
+from typing import TYPE_CHECKING, Final, Protocol, TextIO
 
 from strands.experimental.bidi import (
     BidiAgent,
@@ -90,8 +91,8 @@ from .voice import (
     VOICE_ID_ENV,
     VOICE_MODEL_ENV,
     VOICE_REGION_ENV,
+    Greeting,
     build_nova_sonic_model,
-    greet,
     start_voice_call,
 )
 
@@ -298,47 +299,6 @@ class Silence:
         return label, time.monotonic() - self._since
 
 
-class _Greeting(BidiInput):
-    """Speak first, then hold an input channel open saying nothing.
-
-    A channel rather than a call to `greet` somewhere in `main`, because
-    `BidiAgent.run` owns the connection and `start` is the only point
-    between "the connection is open" and "the patient is being listened
-    to" -- which is exactly where a greeting goes.
-    """
-
-    def __init__(self, silence: Silence) -> None:
-        self._silence = silence
-        self._finished = asyncio.Event()
-
-    async def start(self, agent: BidiAgent) -> None:
-        """Send the opening turn, and start timing the wait it costs.
-
-        Args:
-            agent: The started voice agent for this call.
-        """
-        self._silence.mark(GREETING_LABEL)
-        await greet(agent)
-
-    async def stop(self) -> None:
-        """Release the pump task waiting on this channel."""
-        self._finished.set()
-
-    async def __call__(self) -> NoReturn:
-        """Never return an event: this channel has said its one thing.
-
-        `run` reads every input channel in a loop, so contributing
-        exactly one turn means blocking afterwards. The wait ends at
-        `stop`, during teardown, where the pump task is being cancelled
-        anyway and nothing is read from this channel again.
-
-        Raises:
-            asyncio.CancelledError: Always, once the call is over.
-        """
-        await self._finished.wait()
-        raise asyncio.CancelledError
-
-
 class CallMonitor(BidiOutput):
     """Print what goes past, and time the silences.
 
@@ -510,7 +470,7 @@ async def run_call(
     silence = Silence()
     inputs: list[BidiInput] = [audio.input()]
     if greeting:
-        inputs.append(_Greeting(silence))
+        inputs.append(Greeting(on_start=lambda: silence.mark(GREETING_LABEL)))
     outputs: list[BidiOutput] = [
         audio.output(),
         CallMonitor(silence, writer, verbose=verbose),

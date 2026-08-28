@@ -14,3 +14,9 @@ strands-agents[bidi]>=1.54
 # is one (Lambda, Linux containers); Windows has none, so a clinic's
 # `timezone` would look misconfigured during local development without it.
 tzdata>=2024.1
+# `agents/agentcore_app.py`'s web framework: the `/ws` and `/ping` routes
+# Bedrock AgentCore Runtime expects. Not needed by the Lambda handlers,
+# but not split out of this shared file either -- the same call already
+# made for `strands-agents[bidi]`, which they don't need either.
+fastapi>=0.115
+uvicorn[standard]>=0.30

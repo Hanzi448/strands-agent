@@ -30,6 +30,13 @@ Update this file after every meaningful implementation change.
   times every silence in it. What is left of the voice path is the
   deployed one: the AgentCore entrypoint (Next Up #1), which is the same
   `run` call with a WebSocket's channels instead of a sound card.
+- **The deployed entrypoint's code now exists too.**
+  `backend/agents/agentcore_app.py` is a FastAPI `/ping` + `/ws` shaped
+  like the vendored sample's `agent/strands_agent.py`, verified offline
+  through FastAPI's own ASGI test client. What is left of Next Up #1 is
+  no longer code: it is `agent_stack.py`'s CDK resources, a Dockerfile,
+  a container build, and a real Bedrock connection — none of which this
+  environment can do right now (Session Notes).
 - **Still nothing here has met a real model.** Both interfaces exist and
   run, but running either for real needs credentials and seeded clinics
   (Next Up #5); against an unconfigured shell they fail as designed, on
@@ -41,12 +48,14 @@ Update this file after every meaningful implementation change.
 
 - **Phase 3: the agents.** The three-agent tree is in — Orchestrator
   over Scheduling and Escalation — verified end to end offline, and
-  reachable two ways: `python -m agents.cli <clinic-id>` from a keyboard
-  and `python -m agents.mic <clinic-id>` from a microphone. Phase 3's
-  remaining work is not more agent code and no longer any local
-  plumbing: it is **deploying the voice agent** (Next Up #1) and
-  **pointing either interface at something real** (credentials plus
-  seeded clinics, #5). That second one is now the bottleneck for three
+  reachable three ways: `python -m agents.cli <clinic-id>` from a
+  keyboard, `python -m agents.mic <clinic-id>` from a microphone, and
+  (once deployed) `agents.agentcore_app:app`'s `/ws` from a browser.
+  Phase 3's remaining code is written; what remains of Next Up #1 is
+  **provisioning and deploying it** (CDK resources, a Dockerfile, a
+  container build) and **pointing any interface at something real**
+  (credentials plus seeded clinics, #5). That second one is now the
+  bottleneck for three
   open questions at once — who greets the patient and what it costs in
   dead air, which voice each clinic answers in, and which text model the
   sub-agents reason with — all of which are answered by listening to one
@@ -866,28 +875,119 @@ Update this file after every meaningful implementation change.
   question, the voice choice and the text-model value are all settled by
   listening rather than by argument.
 
+- **`backend/agents/agentcore_app.py`: the deployed voice entrypoint's
+  code** (Next Up #1, first half). The third interface over `voice.py`,
+  after `cli.py` and `mic.py`, and the one a patient's own browser will
+  eventually reach. One module, a 9-test suite.
+  **Split from the old "deploy to AgentCore Runtime" item**, the same
+  way `voice.py`/`mic.py` split before it
+  (`ai-workflow-rules.md` -> When to Split Work: Python logic and its
+  CDK deployment are separate steps). This unit is the half that is
+  code — a FastAPI app shaped exactly like the vendored sample's
+  `agent/strands_agent.py`: `/ping` for AgentCore's health check, `/ws`
+  calling `BidiAgent.run` with `websocket.receive_json`/`send_json` as
+  its IO channels. Provisioning the AgentCore Runtime resources in
+  `agent_stack.py`, a Dockerfile, and hearing a real call all remain,
+  now the other half of #1.
+  **The clinic arrives on the connection, never in the conversation.**
+  `clinic_id` is read from the `/ws` query string
+  (`/ws?clinic_id=clinic-dental`) before `websocket.accept()` is ever
+  called — not invented: AgentCore's own presigned URL already puts the
+  session id in a query parameter (`websocket-presigned.ts`), so this
+  rides the mechanism already proven to survive AgentCore's proxy rather
+  than adding a second one. A call that cannot work — no clinic id, an
+  unknown clinic, a config `ClinicSession.start` cannot resolve — is
+  refused with `WebSocket.close()` **before** `accept()`, so nothing is
+  ever half-opened for a call that was never going to happen.
+  **Only a failure's stable `code` crosses the socket; the message never
+  does.** The far end is an anonymous browser tab, not a developer with
+  a terminal — the same distinction `results.py` draws for
+  `ConfigurationError`, applied here to the whole call. Mutation-checked:
+  swapping `error.code` for `error.message` in the close reason fails
+  three tests.
+  **Nothing here calls `agent.stop()`.** `BidiAgent.run`'s own `finally`
+  already stops every input, output and the agent itself — the vendored
+  sample calls it again anyway; this module trusts the same cleanup
+  `mic.py` already trusts instead of repeating it. The handler's own
+  `finally` closes the WebSocket unconditionally and swallows whatever
+  that raises, logged at `debug` — a real dead transport can fail this
+  in ways no in-process test can produce, and none of them should crash
+  the connection's task over a step with nothing left to do.
+  **The greeting channel moved out of `mic.py` and into `voice.py`,
+  public and renamed `Greeting`.** It was `_Greeting`, private to the
+  microphone interface; this entrypoint needs the same one-shot
+  "speak-first-then-block" channel (`BidiAgent.run` gives no other hook
+  between "connection open" and "patient being listened to"), and a
+  second copy would be the greeting experiment split across two files
+  that could drift. `mic.py`'s own silence-timing stayed behind, threaded
+  through as an optional `on_start` callback `Greeting` calls before
+  sending — this entrypoint passes none.
+  **No PyAudio anywhere in this path.** Unlike the vendored sample's
+  `Dockerfile`, which installs PortAudio "even though we don't directly
+  use mic/speakers", this module never imports `BidiAudioIO`: a browser
+  sends and receives the same JSON audio *events* `mic.py`'s fake
+  channels already use in tests, never raw PCM through a sound card.
+  **Dependency added**: `fastapi` and `uvicorn[standard]` in
+  `backend/requirements.txt` — this module's web framework. Left in the
+  shared file rather than split out for the Lambda handlers, the same
+  call already made for `strands-agents[bidi]`.
+  Verified: `pytest` from `backend/` — **614 passed** (605 before, 9
+  new), the pre-existing 605 unchanged except for the `Greeting` move
+  (all `mic.py` tests still pass through it). Offline throughout, via
+  FastAPI's own ASGI test client (`fastapi.testclient.TestClient`) rather
+  than a real socket: `HangingUpBidiModel`, imported from `test_mic.py`
+  rather than restated, stands where Nova Sonic will. Whole calls are
+  driven through the real app and the real `BidiAgent` loop — a
+  transcript event is asserted to serialise to exactly the
+  `{"type": "bidi_transcript_stream", ...}` shape
+  `websocket-presigned.ts` already parses, a client-sent dict is proved
+  to reach the model as the greeting did, connecting to the cosmetic
+  clinic is proved to build the cosmetic clinic's prompt (not assumed
+  from the code path), and a browser disconnecting mid-call — the
+  server still blocked on `receive_json` — is proved not to escape the
+  handler as an unhandled exception. Two guards were mutation-checked
+  (the close-reason leak above, and that `accept()` cannot move ahead of
+  clinic validation, which fails seven of the nine tests). A manual
+  thread-pool timeout wraps every live-call test, since `TestClient`'s
+  WebSocket support has none of its own — the same role
+  `asyncio.wait_for` plays in every other suite that drives a live call.
+  **Not verified, and cannot be yet, in this environment**: the actual
+  deploy. No AWS credentials are usable here — see Session Notes — so
+  the Dockerfile, the CDK wiring, the container build and a real Bedrock
+  connection all remain, along with everything that needed a real call
+  before this point.
+
 ## In Progress
 
 - None.
 
 ## Next Up
 
-Both halves of the old "drive the voice agent" item are now in
-Completed: `voice.py` builds the speech agent and `mic.py` drives it
-from a microphone. Nothing local is left unbuilt — what remains needs
-AWS resources that do not exist yet, which is why **#5 (seed) unblocks
-more than its position suggests**: it is what turns `mic.py` from a
-program that runs into a call someone can listen to, and it is where
-the greeting, voice and text-model questions get answered.
+Both halves of the old "drive the voice agent" item are in Completed:
+`voice.py` builds the speech agent and `mic.py` drives it from a
+microphone. The old "deploy to AgentCore Runtime" item has now had the
+same split applied to it (`ai-workflow-rules.md` -> When to Split Work:
+Python logic and its CDK deployment are separate steps) — the code half,
+`agents/agentcore_app.py`, is in Completed below. What remains of #1 is
+now purely infrastructure and a real call, and needs AWS resources that
+do not exist yet, which is why **#5 (seed) unblocks more than its
+position suggests**: it is what turns either interface, and soon the
+deployed one, from a program that runs into a call someone can listen
+to, and it is where the greeting, voice and text-model questions get
+answered.
 
-1. Deploy to AgentCore Runtime, verify voice session end-to-end. The
-   sample's `agent/strands_agent.py` is the reference shape: a FastAPI
-   `/ws` endpoint calling `BidiAgent.run` with the WebSocket's
-   `receive_json`/`send_json` as its IO channels, plus the `/ping`
-   health check AgentCore requires. Ours differs in one way that
-   matters — the clinic is chosen when the session opens, so the
-   handler reads it from the connection and calls `start_voice_call`,
-   never taking it from anything the patient says.
+1. Provision AgentCore Runtime and deploy `agentcore_app.py` to it,
+   then verify one voice session end-to-end. The Python side is done
+   (see Completed) — this item is `agent_stack.py`'s CDK resources
+   (AgentCore Runtime, its container build/push, its execution role),
+   containerising `backend/` (a Dockerfile is not written yet — the
+   vendored sample's `agent/Dockerfile` is the reference shape, minus
+   the PyAudio/PortAudio layer this path does not need), and pointing a
+   real browser or `websocat`-style client at the deployed `/ws` with a
+   seeded clinic behind it. **Blocked in this environment specifically**:
+   see Session Notes — no AWS credentials are usable here for anything
+   beyond local, offline work, so this item needs a session (or a
+   person) that actually has them.
 2. Add the Knowledge Base source S3 bucket to the data stack
    (`kb/{clinic_id}/` prefixes) and the Bedrock Knowledge Base over it
    in the agent stack — these deploy together, so they are one unit.
@@ -1632,3 +1732,41 @@ the greeting, voice and text-model questions get answered.
   the original single-day query window (an hour short each autumn) and
   would bite any future code that walks days, so the day boundary has
   one implementation and a test that spans 2026-10-25.
+
+- **This environment has no AWS credentials it can act with, and that
+  is enforced two ways, not one.** `aws sts get-caller-identity` against
+  the default profile fails with `NoCredentials`; a named profile
+  (`Hanzala`) exists in `~/.aws/config` but invoking it — even a
+  read-only identity check — is refused by this session's own auto-mode
+  permission classifier before it reaches AWS at all. So Next Up #1's
+  remaining half (provisioning AgentCore Runtime, building and pushing a
+  container, `cdk deploy`) cannot be attempted from this environment
+  even with `--profile Hanzala` supplied; it needs a session, or a
+  person, with standing permission to take real AWS actions. Worth
+  checking again at the start of whatever session picks up #1 rather
+  than assumed still true.
+- **`fastapi.testclient.TestClient`'s WebSocket support has no timeout
+  of its own** (`starlette.testclient.WebSocketTestSession.receive`
+  blocks on a cross-thread queue with nothing bounding the wait), unlike
+  every other live-call suite in this package, which wraps its own
+  `asyncio.wait_for`. `test_agentcore_app.py` reproduces the same safety
+  net with a one-shot `concurrent.futures.ThreadPoolExecutor` around the
+  whole synchronous drive function. Worth reusing rather than
+  rediscovering if another suite ever drives a FastAPI WebSocket route
+  this way.
+- **A `TypedEvent` (every Bidi event class) is a `dict` subclass**
+  (`strands/types/_events.py`), which is what lets `agentcore_app.py`
+  pass `websocket.send_json` directly as a `BidiAgent.run` output the
+  same way the vendored sample does — no `.to_dict()`, no adapter. It
+  also means an event serialises with a `type` field already spelled
+  the way the vendored frontend's `websocket-presigned.ts` expects
+  (`bidi_transcript_stream`, `bidi_connection_close`, ...): the wire
+  protocol was designed to match, not merely made to work. Confirmed by
+  reading one back through `json.dumps`, not assumed.
+- **`BidiAgent.send` reconstructs a plain dict into a typed event itself**
+  when it carries a `"type"` key (`agent.py` -> `send`), which is what
+  lets `websocket.receive_json` feed it directly. Its own docstring
+  example is wrong, though (`"bidirectional_text_input"`); the type
+  string the code actually matches is `"bidi_text_input"` — used in
+  `test_agentcore_app.py` and worth not copying the docstring's version
+  if this is touched again.

@@ -54,17 +54,20 @@ same experiment.
 
 This module builds the agent. Driving one -- opening the connection,
 pumping audio in and out, closing it -- belongs to whatever holds the
-session: a local microphone interface, and the AgentCore Runtime
-entrypoint. Neither exists yet.
+session: `mic.py` (a local microphone) and `agentcore_app.py` (a
+browser's WebSocket, once deployed).
 """
 
 from __future__ import annotations
 
+import asyncio
 import os
-from typing import Final
+from collections.abc import Callable
+from typing import Final, NoReturn
 
 from strands.experimental.bidi import BidiAgent
 from strands.experimental.bidi.models.model import BidiModel
+from strands.experimental.bidi.types.io import BidiInput
 from strands.models.model import Model
 
 from .orchestrator import (
@@ -281,6 +284,55 @@ async def greet(agent: BidiAgent) -> None:
         agent: The started voice agent for this call.
     """
     await agent.send(OPENING_TURN)
+
+
+class Greeting(BidiInput):
+    """Speak first, then hold an input channel open saying nothing.
+
+    An input *channel* rather than a bare call to `greet` in whatever
+    holds the session, because `BidiAgent.run` owns the connection: it
+    starts the agent, then starts each channel, then begins pumping.
+    `start` is therefore the only point between "the connection is open"
+    and "the patient is being listened to" -- exactly where a greeting
+    goes. Shared by every interface that opens a call this way (`mic.py`,
+    the AgentCore entrypoint), so the greeting experiment stays one
+    channel rather than two that could drift.
+
+    Blocks forever after sending, since `run` reads every input channel
+    in a loop and one that yielded twice would talk over the patient's
+    first sentence with a second stage direction.
+    """
+
+    def __init__(self, *, on_start: Callable[[], None] | None = None) -> None:
+        """Initialise the channel.
+
+        Args:
+            on_start: Called synchronously just before the greeting is
+                sent, for a caller that needs to know *when* -- `mic.py`
+                uses it to start timing the silence a model-composed
+                greeting costs. Not called at all if omitted.
+        """
+        self._on_start = on_start
+        self._finished = asyncio.Event()
+
+    async def start(self, agent: BidiAgent) -> None:
+        """Send the opening turn."""
+        if self._on_start is not None:
+            self._on_start()
+        await greet(agent)
+
+    async def stop(self) -> None:
+        """Release the pump task waiting on this channel."""
+        self._finished.set()
+
+    async def __call__(self) -> NoReturn:
+        """Never return an event: this channel has said its one thing.
+
+        Raises:
+            asyncio.CancelledError: Always, once the call is over.
+        """
+        await self._finished.wait()
+        raise asyncio.CancelledError
 
 
 def _from_env(name: str) -> str | None:
