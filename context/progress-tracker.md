@@ -4,30 +4,32 @@ Update this file after every meaningful implementation change.
 
 ## Current Phase
 
-- Phase 2 is **complete on the tool layer**. The AWS sample is vendored
-  as reference code, `backend/infra/` synthesises with the four DynamoDB
-  tables defined (the other four stacks are still empty), and
-  `backend/tools/` now has its foundation, the **complete availability
-  read surface** (`check_availability`, one day or a bounded window of
-  up to 14), the **complete scheduling write surface**
-  (`book_appointment`, `reschedule_appointment`, `cancel_appointment`),
-  and the **complete escalation surface** (`create_escalation`,
-  `list_open_escalations`, `get_escalation`, `resolve_escalation`).
-  All four tables are now written by this layer. The one tool still
-  missing is the FAQ query, which has nothing to query until the
-  Knowledge Base exists and therefore lands with it (Next Up #4).
-  `frontend/`, `backend/agents/`, `backend/lambda/`, and `seed/` do not
+- **Phase 3 has started.** Phase 2's tool layer is complete: the AWS
+  sample is vendored as reference code, `backend/infra/` synthesises
+  with the four DynamoDB tables defined (the other four stacks are
+  still empty), and `backend/tools/` has its foundation, the complete
+  availability read surface, the complete scheduling write surface, and
+  the complete escalation surface. All four tables are written by that
+  layer. The one tool still missing is the FAQ query, which has nothing
+  to query until the Knowledge Base exists and therefore lands with it
+  (Next Up #5).
+- `backend/agents/` now exists with its **foundation**
+  (`session.py`, `results.py`) and the **Scheduling sub-agent**
+  (`scheduling_agent.py`) — the first code in this repo that a model
+  talks to. `escalation_agent.py`, `orchestrator.py` and `faq_agent.py`
+  do not exist yet. `frontend/`, `backend/lambda/` and `seed/` do not
   exist yet.
 
 ## Current Goal
 
-- **Phase 3: the agents.** `backend/tools/` is done, so the next unit
-  is the first one that is not a pure function over DynamoDB. Build the
-  Orchestrator plus the Scheduling and Escalation sub-agents
-  (Agent-as-Tool), wrapping the existing tool functions with `@tool`
-  and testing against a text interface before any voice is wired — the
-  FAQ sub-agent waits for the Knowledge Base. Nothing in
-  `backend/tools/` may move into an agent definition
+- **Phase 3: the agents.** The Scheduling sub-agent is in. The next
+  unit is the **Escalation sub-agent** — the same shape over
+  `tools/escalations.py`, and small, because the agent foundation it
+  needs (`ClinicSession`, the failure translation) already exists.
+  After it, the **Orchestrator**, which is what finally makes the two
+  sub-agents reachable and turns a routing decision into a testable
+  thing. The FAQ sub-agent still waits for the Knowledge Base.
+  Nothing in `backend/tools/` may move into an agent definition
   (`architecture.md` -> Invariants #3): the agents are a thin
   model-facing surface over functions the background Lambda will call
   directly. After the agents: Nova Sonic voice, AgentCore deploy, the
@@ -399,6 +401,86 @@ Update this file after every meaningful implementation change.
   the failure names `clinic_id` and not the second argument, and the
   swap is caught for all four functions.
 
+- **`backend/agents/` foundation + the Scheduling sub-agent**
+  (Next Up #1, first half). The first code in this repo a model talks
+  to. Three modules and a 65-test suite.
+  **Split from the old Next Up #1**, which bundled the Orchestrator and
+  two sub-agents. That item allowed a split and suggested "Orchestrator
+  first"; this went the other way, and the reason is
+  `ai-workflow-rules.md` -> When to Split Work: a router with nothing to
+  route to cannot be verified end to end, while a sub-agent over real
+  tools can. Escalation and the Orchestrator are now Next Up #1 and #2.
+  **`clinic_id` is enforced by shape, not by a guard.** `session.py`
+  holds a `ClinicSession` created once per call; the tools close over
+  it, so `clinic_id` is not a parameter of anything the model is shown
+  and is absent from every JSON schema. A model cannot pass a clinic it
+  was never offered, and a prompt-injected "use the other clinic" has
+  nothing to bind to (`architecture.md` -> Invariants #1). The
+  tool-layer functions still run their own `require_clinic_id` first,
+  so `code-standards.md` -> Python holds on both sides. `start()` reads
+  the clinic once, which also fails a bad id, a missing clinic or an
+  unresolvable timezone *before the greeting* rather than inside the
+  first booking.
+  **The system prompt withholds the opening hours, deliberately.**
+  `ClinicSession.describe()` gives the model the clinic's name, its
+  local date twice (spoken, so it is not read out digit by digit, and
+  `YYYY-MM-DD`, because that is what the tools take) and its services
+  with ids and durations. It does *not* give it `hours` or `closures`:
+  `check_availability` already composes hours, breaks, holidays,
+  service duration and existing bookings into the only correct answer,
+  and a copy of the hours in the prompt is an invitation to answer
+  "we're open till five" without asking. Durations are normalised out
+  of DynamoDB `Decimal`s, or the prompt would say `Decimal('15')`.
+  **A refusal has to arrive as a refusal.** `results.py` translates
+  `ToolError` into the `{"status": "error", "content": [...]}` shape
+  Strands passes through untouched — a failure returned in the ordinary
+  payload shape is one the model is told went fine. `ValidationError`,
+  `NotFoundError` and `ConflictError` keep their messages verbatim
+  (they are things the *patient* can answer, and the tool layer already
+  writes them for the model, naming the alternatives).
+  `ConfigurationError` and any unexpected exception are logged and
+  replaced with one fixed message, because the first quotes internal
+  attribute paths and the second would otherwise reach a speech model
+  as `Error: KeyError - 'starts_at'` with the microphone open.
+  **`scheduling_agent.py` decides nothing.** Four `@tool` wrappers over
+  `check_availability`, `book_appointment`, `reschedule_appointment`
+  and `cancel_appointment`, each one argument-forwarding only; the
+  sub-agent; and `scheduling_agent_tool`, the Agent-as-Tool wrapper the
+  Orchestrator will hold. `actor` is not exposed — it is what the
+  dashboard reads to show which moves the agent made unprompted, so it
+  is not a value a model chooses, exactly as `source` is not on
+  `create_escalation`. The sub-agent is built fresh per call and gets
+  `callback_handler=None`: its answer is a return value for the
+  Orchestrator, and in AgentCore stdout is the log, not the patient's
+  ear.
+  **Dependency added**: `strands-agents>=1.54` in
+  `backend/requirements.txt`. `backend/tools/` still must not import
+  it, and a test now enforces that (see below).
+  Verified: `pytest` from `backend/` — **445 passed** (380 before, 65
+  new), the pre-existing 380 unchanged; nothing outside `backend/agents/`
+  and `requirements.txt` was touched. The suite runs entirely offline: a
+  `ScriptedModel` implementing the Strands `Model` interface emits real
+  Bedrock-shaped stream events, so the event loop, the tool executor and
+  the `@tool` decorator all run for real and only the model's judgement
+  is replaced. That drives Agent-as-Tool end to end — request in, tool
+  call, `backend/tools/` against the same fake tables the tool suites
+  use, spoken answer out — including a booking that reaches the table
+  and a refusal that arrives with `status: "error"`. Tenancy is
+  asserted on the schemas (no tool offers a clinic; passing one is a
+  `TypeError`), on what reached DynamoDB, and on two sessions in one
+  process not seeing each other's clinic. Each wrapper is also compared
+  against its tool-layer function called directly, so a rule drifting
+  up into the agent layer shows as a disagreement between the two. New
+  guard: `backend/tools/` is scanned for any `strands` /
+  `bedrock_agentcore` import, since this package is the first thing
+  that could break `architecture.md` -> System Boundaries by tempting a
+  `@tool` decorator one module too far down.
+  **Not verified, and cannot be yet**: a live text conversation against
+  a real model. It needs seeded clinics in deployed tables (Next Up #8,
+  over a deployed data stack), so the text interface the old item asked
+  for lands with the Orchestrator, which is the thing worth talking to.
+  Nothing here has reached Bedrock.
+
 ## In Progress
 
 - None.
@@ -413,35 +495,42 @@ surface, the scheduling write surface, and the escalation tools are all
 in Completed. The only tool still unwritten is the FAQ query, which
 belongs to the Knowledge Base unit below rather than to that item.
 
-1. Build the Orchestrator agent + Scheduling/Escalation sub-agents
-   (Agent-as-Tool pattern), test locally with a text interface before
-   wiring voice. The FAQ sub-agent is **not** part of this unit — it
-   has nothing to query until item 4 exists, and adding an empty one
-   now would mean writing its prompt twice. Split further if it does
-   not stay verifiable end to end in one step (the Orchestrator and
-   its routing first, sub-agents after, is the natural seam).
-2. Wire Nova Sonic + BidiAgent voice on top of the working
+1. Build the **Escalation sub-agent** (`agents/escalation_agent.py`):
+   `create_escalation` wrapped as a `@tool` bound to the session, and
+   the sub-agent behind an Agent-as-Tool wrapper, following
+   `scheduling_agent.py`. Small, because `ClinicSession` and the
+   failure translation already exist. Note `list_open_escalations`,
+   `get_escalation` and `resolve_escalation` are **staff** reads and do
+   not belong on a patient-facing agent at all — they are the
+   dashboard's (item #7).
+2. Build the **Orchestrator** (`agents/orchestrator.py`): greeting,
+   intent, and routing to the two sub-agent tools. This is what makes
+   the sub-agents reachable, so the local **text interface** belongs
+   here — a small `python -m agents.cli` driving one clinic by
+   keyboard. Needs a real model and seeded data, so it may have to
+   follow items #3/#4 to be run for real rather than only constructed.
+3. Wire Nova Sonic + BidiAgent voice on top of the working
    text-agent logic.
-3. Deploy to AgentCore Runtime, verify voice session end-to-end.
-4. Add the Knowledge Base source S3 bucket to the data stack
+4. Deploy to AgentCore Runtime, verify voice session end-to-end.
+5. Add the Knowledge Base source S3 bucket to the data stack
    (`kb/{clinic_id}/` prefixes) and the Bedrock Knowledge Base over it
    in the agent stack — these deploy together, so they are one unit.
    The FAQ query tool and the FAQ sub-agent land with them, since they
    have nothing to query until the KB exists.
-5. Build the background Lambda + EventBridge schedule, reusing
+6. Build the background Lambda + EventBridge schedule, reusing
    `backend/tools/` functions. Its no-show/reschedule heuristic is not
    specified anywhere yet — per `ai-workflow-rules.md` -> When to Split
    Work that is a spec-then-implement step, not something to invent
    inline. Note the tool it needs already exists:
    `create_escalation(..., source="background")`.
-6. Build the staff dashboard (Cognito auth, appointment list,
+7. Build the staff dashboard (Cognito auth, appointment list,
    escalation queue). Its escalation reads are already written —
    `list_open_escalations`, `get_escalation`, `resolve_escalation`.
-7. Seed the two demo clinics (dental, cosmetic) with config,
+8. Seed the two demo clinics (dental, cosmetic) with config,
    sample appointments, and FAQ documents for the Knowledge Base.
    Settle the phone-number country-code question below first: this is
    the step that fixes a number format.
-8. Architecture diagram, README, demo video, submission assets.
+9. Architecture diagram, README, demo video, submission assets.
 
 ## Open Questions
 
@@ -486,6 +575,28 @@ belongs to the Knowledge Base unit below rather than to that item.
   dependency here is an experimental voice stack, and a capability
   found missing late costs more than the extra round-trip latency of
   a browser demo.
+- **Which text model do the sub-agents reason with?**
+  `architecture.md` -> Stack names Nova Sonic for the *voice* layer and
+  says nothing about the model behind the Orchestrator and its
+  sub-agents, which are ordinary text agents. Not invented here:
+  `build_scheduling_agent` takes an optional `model` and passes `None`
+  by default, which leaves the Strands default (today
+  `global.anthropic.claude-sonnet-4-6` on Bedrock). That is a working
+  default, not a decision — it needs one row in `architecture.md` ->
+  Stack and one place to configure it, before the Orchestrator makes
+  three agents inherit it silently. Blocking nothing; wrong to leave
+  implicit past Next Up #2.
+
+- **Can a patient ask what they already have booked?**
+  `project-overview.md` lists check availability, book, reschedule,
+  cancel and FAQ — not "when is my appointment?". So the Scheduling
+  sub-agent was not given one, even though the tool exists
+  (`find_upcoming_appointments`) and `reschedule_appointment` already
+  names a caller's appointments when it refuses. A patient who phones
+  only to check the time of their visit therefore gets an answer only
+  as a side effect of trying to move it. Deliberately not invented:
+  adding a read tool is one wrapper if the answer is yes.
+
 - **Should a cancellation appear in the staff action log?** Assumed
   **yes**, and implemented: `cancel_appointment` appends a
   `reschedule_history` entry with `to: null`, so who cancelled an
@@ -873,6 +984,37 @@ belongs to the Knowledge Base unit below rather than to that item.
   complexity on every escalation.
 
 ## Session Notes
+
+- **Strands passes a tool's return value through `json.dumps`**, and
+  falls back to `repr` when that fails — so a `Decimal` reaching a tool
+  result is read out to a patient as `Decimal('15')`. The tool layer
+  already coerces durations, and a test now pins that a
+  `check_availability` result survives the dump. Worth remembering for
+  every tool the remaining sub-agents wrap.
+
+- **A `@tool` function's return is marked `success` unless it carries
+  `status` and `content` itself** (`strands/tools/decorator.py` ->
+  `_wrap_tool_result`), in which case it is passed through verbatim.
+  That is why `agents/results.py` returns that shape rather than an
+  `{"error": ...}` payload: the alternative tells the model a refusal
+  went fine. An exception that escapes a tool is caught by Strands and
+  handed to the model as `Error: {type} - {message}` built from the
+  traceback, which is the other reason that module catches broadly.
+
+- **`Agent(model=None)` is not "no model"** — it constructs a
+  `BedrockModel` on the Strands default id, with no credentials needed
+  at construction time. Convenient for tests, and the reason the model
+  choice can be left open (see Open Questions) without blocking
+  anything.
+
+- **`strands-agents` installed into `backend/.venv`** (1.54.0, plus
+  ~35 transitive packages including `mcp`, `pydantic`, `opentelemetry`).
+  Added to `backend/requirements.txt`, not `requirements-dev.txt`: the
+  agents are runtime code. `backend/tools/` must still import neither it
+  nor `bedrock_agentcore`, so a Lambda that only mutates data installs
+  without them — `test_scheduling_agent.py` scans the package and fails
+  if that stops being true.
+
 
 - **The reschedule/cancel entry was filed under "In Progress" rather
   than "Completed"** by the previous session, below a "- None." line,
