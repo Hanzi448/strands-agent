@@ -12,23 +12,26 @@ Update this file after every meaningful implementation change.
   the complete escalation surface. All four tables are written by that
   layer. The one tool still missing is the FAQ query, which has nothing
   to query until the Knowledge Base exists and therefore lands with it
-  (Next Up #5).
+  (Next Up #4).
 - `backend/agents/` now exists with its **foundation**
-  (`session.py`, `results.py`) and the **Scheduling sub-agent**
-  (`scheduling_agent.py`) — the first code in this repo that a model
-  talks to. `escalation_agent.py`, `orchestrator.py` and `faq_agent.py`
-  do not exist yet. `frontend/`, `backend/lambda/` and `seed/` do not
-  exist yet.
+  (`session.py`, `results.py`) and **both patient-facing sub-agents**:
+  Scheduling (`scheduling_agent.py`) and Escalation
+  (`escalation_agent.py`). Every write the tool layer offers a patient
+  call is now reachable through a model. `orchestrator.py` and
+  `faq_agent.py` do not exist yet — and until the Orchestrator lands,
+  nothing calls either sub-agent, which is exactly what makes it the
+  next unit. `frontend/`, `backend/lambda/` and `seed/` do not exist
+  yet.
 
 ## Current Goal
 
-- **Phase 3: the agents.** The Scheduling sub-agent is in. The next
-  unit is the **Escalation sub-agent** — the same shape over
-  `tools/escalations.py`, and small, because the agent foundation it
-  needs (`ClinicSession`, the failure translation) already exists.
-  After it, the **Orchestrator**, which is what finally makes the two
-  sub-agents reachable and turns a routing decision into a testable
-  thing. The FAQ sub-agent still waits for the Knowledge Base.
+- **Phase 3: the agents.** Both sub-agents are in. The next unit is
+  the **Orchestrator** — greeting, intent, and routing to the two
+  Agent-as-Tool wrappers that now exist. It is what makes the
+  sub-agents reachable at all (`architecture.md` -> Invariants #2),
+  and it is the first thing in this repo worth talking to, so the
+  local text interface (`python -m agents.cli`) belongs with it. The
+  FAQ sub-agent still waits for the Knowledge Base.
   Nothing in `backend/tools/` may move into an agent definition
   (`architecture.md` -> Invariants #3): the agents are a thin
   model-facing surface over functions the background Lambda will call
@@ -409,7 +412,7 @@ Update this file after every meaningful implementation change.
   first"; this went the other way, and the reason is
   `ai-workflow-rules.md` -> When to Split Work: a router with nothing to
   route to cannot be verified end to end, while a sub-agent over real
-  tools can. Escalation and the Orchestrator are now Next Up #1 and #2.
+  tools can. Escalation shipped next; the Orchestrator is Next Up #1.
   **`clinic_id` is enforced by shape, not by a guard.** `session.py`
   holds a `ClinicSession` created once per call; the tools close over
   it, so `clinic_id` is not a parameter of anything the model is shown
@@ -476,10 +479,70 @@ Update this file after every meaningful implementation change.
   that could break `architecture.md` -> System Boundaries by tempting a
   `@tool` decorator one module too far down.
   **Not verified, and cannot be yet**: a live text conversation against
-  a real model. It needs seeded clinics in deployed tables (Next Up #8,
+  a real model. It needs seeded clinics in deployed tables (Next Up #7,
   over a deployed data stack), so the text interface the old item asked
   for lands with the Orchestrator, which is the thing worth talking to.
   Nothing here has reached Bedrock.
+
+- **The Escalation sub-agent** (`backend/agents/escalation_agent.py`,
+  Next Up #1). The handover to a human — `architecture.md` ->
+  Invariants #6's route for anything outside the rules
+  `backend/tools/` encodes — and the second half of the old bundled
+  agent item. One module, a 29-test suite, and the same four-part shape
+  as `scheduling_agent.py`: `escalation_tools`, `build_escalation_agent`,
+  `escalation_agent_tool`, and a system prompt formatted with
+  `ClinicSession.describe()`.
+  **It holds one tool, and the choice of which is the point.**
+  `tools/escalations.py` has four functions; only `create_escalation`
+  is here. `list_open_escalations`, `get_escalation` and
+  `resolve_escalation` answer "what is outstanding at this clinic?"
+  and "who dealt with it?" — staff questions, behind Cognito on the
+  dashboard (`architecture.md` -> Invariants #5). A patient-facing
+  agent holding any of them could read another caller's complaint out
+  loud. The suite names all three individually, so wiring one back
+  fails a test that says why.
+  **`source` is not exposed**, for the reason `actor` is not on
+  `reschedule_appointment`: it records which path raised the row, and
+  each path knows its own. This module passes `voice` explicitly rather
+  than leaning on the default, because the background Lambda will call
+  the same function with `background` and the contrast is the whole
+  point of the attribute.
+  **`patient_id` and `appointment_id` *are* exposed**, which was the
+  one real decision. They are ids a booking result carries, so the
+  conversation genuinely holds them, and the tool layer already asked
+  for them ("it is how staff reach the person back"). The hallucination
+  risk is real but already settled one layer down: `create_escalation`
+  stores back-references unverified on purpose, because a stale
+  reference must never stop an escalation being written. Exposing them
+  keeps the wrapper pure forwarding; withholding them would push the
+  patient's phone number into free text instead. Both docstring and
+  prompt say: only an id a tool returned in this conversation, never a
+  constructed one.
+  **The shared failure message is overridden in the prompt.**
+  `results.INTERNAL_FAILURE_MESSAGE` tells the model to say a member of
+  staff will follow up — true when a *booking* tool breaks, false here,
+  because the thing that records the follow-up is the thing that just
+  failed. Fixed in this agent's system prompt (if the tool did not
+  succeed, nothing was recorded: say so, do not promise a callback)
+  rather than by making the shared message vaguer for every other
+  agent. A test pins both halves so the two cannot drift.
+  Verified: `pytest` from `backend/` — **474 passed** (445 before, 29
+  new), the pre-existing 445 unchanged; nothing outside
+  `backend/agents/` was touched (`escalation_agent.py` added,
+  `agents/__init__.py`'s module list updated). Offline throughout,
+  reusing the `Escalations` fake from `test_escalations.py`, the clinic
+  fixtures from `test_scheduling.py` and the `ScriptedModel` from
+  `test_scheduling_agent.py` rather than restating any of them. Agent-
+  as-Tool is driven end to end — situation in, `create_escalation`
+  against the fake table, spoken answer out — including a failed write
+  that comes back as `status: "error"` and never as a recorded
+  escalation, and a final test asserting the two sub-agents' tool sets
+  are disjoint. Two guards were mutation-checked: exposing `source`
+  and leaking `list_open_escalations` each fail the tests that name
+  them.
+  **Not verified, and cannot be yet**: anything against a real model,
+  and whether the prompt's "once, and once only" actually stops a
+  duplicate queue card. Both need the Orchestrator and seeded clinics.
 
 ## In Progress
 
@@ -495,42 +558,35 @@ surface, the scheduling write surface, and the escalation tools are all
 in Completed. The only tool still unwritten is the FAQ query, which
 belongs to the Knowledge Base unit below rather than to that item.
 
-1. Build the **Escalation sub-agent** (`agents/escalation_agent.py`):
-   `create_escalation` wrapped as a `@tool` bound to the session, and
-   the sub-agent behind an Agent-as-Tool wrapper, following
-   `scheduling_agent.py`. Small, because `ClinicSession` and the
-   failure translation already exist. Note `list_open_escalations`,
-   `get_escalation` and `resolve_escalation` are **staff** reads and do
-   not belong on a patient-facing agent at all — they are the
-   dashboard's (item #7).
-2. Build the **Orchestrator** (`agents/orchestrator.py`): greeting,
-   intent, and routing to the two sub-agent tools. This is what makes
+1. Build the **Orchestrator** (`agents/orchestrator.py`): greeting,
+   intent, and routing to `scheduling_agent_tool` and
+   `escalation_agent_tool`, both of which now exist. This is what makes
    the sub-agents reachable, so the local **text interface** belongs
    here — a small `python -m agents.cli` driving one clinic by
    keyboard. Needs a real model and seeded data, so it may have to
-   follow items #3/#4 to be run for real rather than only constructed.
-3. Wire Nova Sonic + BidiAgent voice on top of the working
+   follow items #2/#3 to be run for real rather than only constructed.
+2. Wire Nova Sonic + BidiAgent voice on top of the working
    text-agent logic.
-4. Deploy to AgentCore Runtime, verify voice session end-to-end.
-5. Add the Knowledge Base source S3 bucket to the data stack
+3. Deploy to AgentCore Runtime, verify voice session end-to-end.
+4. Add the Knowledge Base source S3 bucket to the data stack
    (`kb/{clinic_id}/` prefixes) and the Bedrock Knowledge Base over it
    in the agent stack — these deploy together, so they are one unit.
    The FAQ query tool and the FAQ sub-agent land with them, since they
    have nothing to query until the KB exists.
-6. Build the background Lambda + EventBridge schedule, reusing
+5. Build the background Lambda + EventBridge schedule, reusing
    `backend/tools/` functions. Its no-show/reschedule heuristic is not
    specified anywhere yet — per `ai-workflow-rules.md` -> When to Split
    Work that is a spec-then-implement step, not something to invent
    inline. Note the tool it needs already exists:
    `create_escalation(..., source="background")`.
-7. Build the staff dashboard (Cognito auth, appointment list,
+6. Build the staff dashboard (Cognito auth, appointment list,
    escalation queue). Its escalation reads are already written —
    `list_open_escalations`, `get_escalation`, `resolve_escalation`.
-8. Seed the two demo clinics (dental, cosmetic) with config,
+7. Seed the two demo clinics (dental, cosmetic) with config,
    sample appointments, and FAQ documents for the Knowledge Base.
    Settle the phone-number country-code question below first: this is
    the step that fixes a number format.
-9. Architecture diagram, README, demo video, submission assets.
+8. Architecture diagram, README, demo video, submission assets.
 
 ## Open Questions
 
@@ -552,7 +608,7 @@ belongs to the Knowledge Base unit below rather than to that item.
   The reason is voice latency — each extra tool round trip is a pause
   the patient hears, and a clinic open `tue`–`sat` would otherwise
   need up to seven to answer "when are you next free?". Additive:
-  `days=1` is the behaviour already built and tested. Now Next Up #1.
+  `days=1` is the behaviour already built and tested. Shipped.
 
 - ~~**What does one entry in an appointment's `reminders` /
   `reschedule_history` list contain?**~~ **Resolved** — specified in
@@ -579,13 +635,13 @@ belongs to the Knowledge Base unit below rather than to that item.
   `architecture.md` -> Stack names Nova Sonic for the *voice* layer and
   says nothing about the model behind the Orchestrator and its
   sub-agents, which are ordinary text agents. Not invented here:
-  `build_scheduling_agent` takes an optional `model` and passes `None`
-  by default, which leaves the Strands default (today
-  `global.anthropic.claude-sonnet-4-6` on Bedrock). That is a working
-  default, not a decision — it needs one row in `architecture.md` ->
-  Stack and one place to configure it, before the Orchestrator makes
-  three agents inherit it silently. Blocking nothing; wrong to leave
-  implicit past Next Up #2.
+  `build_scheduling_agent` and `build_escalation_agent` each take an
+  optional `model` and pass `None` by default, which leaves the Strands
+  default (today `global.anthropic.claude-sonnet-4-6` on Bedrock). That
+  is a working default, not a decision — it needs one row in
+  `architecture.md` -> Stack and one place to configure it, before the
+  Orchestrator makes three agents inherit it silently. Two of the three
+  now do. Blocking nothing; wrong to leave implicit past Next Up #1.
 
 - **Can a patient ask what they already have booked?**
   `project-overview.md` lists check availability, book, reschedule,
@@ -627,7 +683,7 @@ belongs to the Knowledge Base unit below rather than to that item.
   a no-op, which the dashboard can absorb by treating `conflict` on
   this call as success. Reversible: one branch, one message, and the
   tests that pin it are named for the behaviour. If the dashboard would
-  rather have it idempotent, say so before Next Up #6 is built.
+  rather have it idempotent, say so before Next Up #5 is built.
 
 - **What bounds the escalation queue read?** `list_open_escalations`
   takes an optional `limit`, defaulting to 50 and capped at 100

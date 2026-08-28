@@ -20,7 +20,11 @@ Modules:
         act on -- and keeping a broken deployment out of a patient's ear.
     scheduling_agent: the Scheduling sub-agent -- availability, booking,
         rescheduling, cancellation -- and its Agent-as-Tool wrapper.
+    escalation_agent: the Escalation sub-agent -- the handover to a human
+        (Invariants #6) -- and its Agent-as-Tool wrapper. It holds
+        `create_escalation` alone: the escalation *reads* are staff-only
+        and belong to the dashboard, not to a patient-facing agent.
 
-Still to land: `escalation_agent`, `orchestrator`, and `faq_agent` (which
-waits on the Knowledge Base).
+Still to land: `orchestrator`, and `faq_agent` (which waits on the
+Knowledge Base).
 """
