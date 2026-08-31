@@ -1,0 +1,43 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* `ui-context.md` -> Colors. Light theme only (v1) -- no dark-mode
+   variant is defined there, so none is added here. */
+:root {
+  --bg-base: #f7f8fa;
+  --bg-surface: #ffffff;
+  --text-primary: #1b2430;
+  --text-muted: #5c6b7a;
+  --accent-primary: #2f8f7e;
+  --accent-secondary: #5b7fdb;
+  --border-default: #e2e6ea;
+  --state-error: #d64545;
+  --state-success: #2fa36b;
+  --state-warning: #d98a2b;
+
+  /* Light tints of the above, precomputed (~12% over `--bg-surface`) for
+     badge/active-nav backgrounds. Not in `ui-context.md` directly -- an
+     implementation detail of translating its solid state colors into a
+     soft background a solid-colored label can sit on. Tailwind's opacity
+     modifier (`bg-[var(--x)]/15`) cannot do this itself: it needs a color
+     function it can inject an alpha channel into, and a bare `var()`
+     reference isn't one -- silently producing no rule at all. */
+  --bg-accent-primary-wash: #e6f2f0;
+  --bg-accent-secondary-wash: #ebf0fb;
+  --bg-state-success-wash: #e6f4ed;
+  --bg-state-warning-wash: #faf1e6;
+  --bg-state-error-wash: #fae9e9;
+
+  /* Modal backdrop: has to stay translucent (it sits over arbitrary page
+     content, not a flat surface), so it is an `rgba()` value directly
+     rather than a mixed-in-advance hex like the washes above. */
+  --overlay-scrim: rgba(27, 36, 48, 0.4);
+}
+
+body {
+  margin: 0;
+  background: var(--bg-base);
+  color: var(--text-primary);
+  font-family: "Inter", system-ui, sans-serif;
+}

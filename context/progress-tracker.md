@@ -89,6 +89,22 @@ Update this file after every meaningful implementation change.
   stacks. What is left of Next Up #2 is UI only
   (`frontend/src/dashboard/`) plus the unrelated guest-identity Cognito
   identity pool the voice endpoint still needs — see Next Up.
+- **The dashboard's UI has landed too, and with it `frontend/` itself.**
+  `frontend/src/dashboard/` is a Cognito login screen, an appointments
+  view (with each appointment's own reminder/reschedule history readable
+  inline, since that is what `project-overview.md` -> Staff Dashboard's
+  "log of autonomous actions" turned out to mean once there was a UI to
+  render it in), and an escalation queue with a detail modal and "Mark
+  Resolved". This is also the first thing under `frontend/` at all, so
+  the unit scaffolded the Vite + React + TypeScript + Tailwind +
+  shadcn/ui project `architecture.md` -> Stack specifies, scoped to only
+  what the dashboard needs — `frontend/src/voice/` is still unbuilt and
+  not this unit's concern. `npm run build` passes; the login screen, its
+  unconfigured-backend error state, and the appointment/escalation cards
+  were screenshotted in a headless browser (see Completed) — the
+  farthest any frontend work in this repo has been verified without a
+  deployed backend to point it at. What is left of Next Up #2 is only
+  2b: the separate, patient-facing guest-identity Cognito pool.
 
 ## Current Goal
 
@@ -117,13 +133,14 @@ Update this file after every meaningful implementation change.
   done (see Completed) — its own remaining step is the same blocked
   deploy as Next Up #1's. The staff dashboard's Python half (the new
   clinic-wide appointment read, and `dashboard_api.py`'s four routes)
-  and its CDK half (`api_stack.py`'s Cognito user pool, API Gateway, and
-  Lambda) are both done now too (see Completed); what is left of it is
-  `frontend/src/dashboard/` and the separate patient-facing guest
-  identity pool, split apart per `ai-workflow-rules.md` -> When to Split
-  Work (infra and frontend are each their own step, and neither is
-  Python). Next up: AgentCore deploy, the dashboard's UI, and the seed
-  scripts (which now also creates the two staff Cognito accounts).
+  its CDK half (`api_stack.py`'s Cognito user pool, API Gateway, and
+  Lambda), and now its UI half (`frontend/src/dashboard/`, plus the
+  `frontend/` scaffolding it needed) are all done too (see Completed);
+  what is left of it is only the separate patient-facing guest identity
+  pool, split apart per `ai-workflow-rules.md` -> When to Split Work
+  (infra and frontend are each their own step, and neither is Python).
+  Next up: AgentCore deploy and the seed scripts (which now also creates
+  the two staff Cognito accounts) — see Next Up.
 
 ## Completed
 
@@ -1652,6 +1669,96 @@ Update this file after every meaningful implementation change.
   Notes), and all still waiting on Next Up #3's seed script for the two
   demo accounts this pool is built to hold.
 
+- **`frontend/src/dashboard/`: the staff dashboard UI** (Next Up #2a).
+  The first frontend code in this repo, and the first thing under
+  `frontend/` at all — so this unit also scaffolds the Vite + React +
+  TypeScript + Tailwind + shadcn/ui project `architecture.md` -> Stack
+  names, scoped to exactly what the dashboard needs (`ai-workflow-rules.md`
+  -> When to Split Work: backend and frontend are separate steps, and
+  `frontend/src/voice/` is not this step — it does not exist yet and
+  nothing here builds toward it beyond the shared scaffolding both will
+  use).
+  **`App.tsx` mounts the dashboard directly, not behind a router.**
+  `architecture.md` -> Stack says one SPA serves both surfaces
+  eventually, but `frontend/src/voice/` is unbuilt and not in this unit's
+  scope, so inventing a router for a second route with nothing behind it
+  would be exactly the kind of unspecified behavior `ai-workflow-rules.md`
+  -> Handling Missing Requirements says not to guess at. Splitting the
+  two by route is `voice/`'s own task when it lands.
+  **shadcn/ui components are hand-authored, not CLI-generated** —
+  `button`, `card`, `badge`, `input`, `label`, `dialog` in
+  `shared/components/ui/`, each following the CLI's own structure
+  (`cva` variants, `forwardRef`, Radix primitives where the CLI would use
+  one) so they stay swappable for real CLI output later
+  (`ai-workflow-rules.md` -> Protected Files already treats this
+  directory as CLI-owned). Colors reference the CSS custom properties in
+  `index.css` directly (`bg-[var(--bg-surface)]`) rather than shadcn's
+  usual `hsl(var(--x))` indirection, since `ui-context.md` already gives
+  hex values and converting ten of them to HSL by hand for an effect
+  (alpha-channel utilities) this build does not need was not worth the
+  transcription risk.
+  **One real bug this surfaced**: Tailwind's opacity modifier on an
+  arbitrary `var()` reference (`bg-[var(--state-success)]/15`) silently
+  emits no CSS rule at all — no build error, just a badge with no
+  background. Fixed by precomputing five light "wash" tints as their own
+  CSS custom properties (`--bg-state-success-wash`, etc., ~12% of each
+  state color over `--bg-surface`) and a separate `--overlay-scrim` for
+  the modal backdrop (which has to stay a translucent `rgba()`, unlike
+  the flat wash tokens, since it sits over arbitrary page content) —
+  documented in `index.css` so the next person reaching for `/NN` on a
+  `var()` does not repeat it.
+  **Cognito is built lazily**, not at module load
+  (`dashboard/lib/auth.ts`): `CognitoUserPool`'s constructor throws on a
+  blank id, and no `.env` has real values yet — Next Up #3 (seed) has not
+  run and the CDK that precedes it has not deployed (Session Notes). A
+  module-level throw would blank-screen the app before the login form
+  could explain why; instead `getCurrentUser`/`getIdToken` resolve `null`
+  and `signIn` throws a clear "Dashboard is not configured" message the
+  login form renders — verified by screenshot (see below), not just
+  inferred.
+  **No `signUp`/`confirmSignUp`**, unlike the vendored sample's own
+  `auth.ts` this was adapted from: `api_stack.py`'s user pool has
+  self-sign-up disabled and will only ever hold the two seeded demo
+  accounts (`architecture.md` -> Auth and Access Model), so a
+  registration flow would be dead code against a pool that refuses it.
+  **The "log of autonomous actions"** (`project-overview.md` -> Staff
+  Dashboard) is rendered inline per appointment (`AppointmentCard`'s
+  expandable section) rather than as a fourth nav page: `ui-context.md`
+  -> Layout Patterns names exactly three sidebar items
+  (Appointments/Escalations/Settings), and `architecture.md` -> Storage
+  Model already derives the log from each appointment's own
+  `reschedule_history`/`reminders` — data `list_appointments_for_clinic`
+  already returns, so no new route was needed and none was added. Only
+  `actor: "agent"` reschedule/cancel entries are shown, mirroring
+  `schema.RescheduleActor`'s own reason for existing: the log's whole
+  point is showing which moves the agent made unprompted. Settings has no
+  behavior defined anywhere in the context files, so its nav entry
+  renders a one-line placeholder rather than invented functionality.
+  **`clinic_id` is never a frontend parameter.** Every `dashboardApi.ts`
+  function takes only what its route needs beyond the Cognito token
+  (`date` for `listAppointments`, an id for the two escalation routes) —
+  matching `dashboard_api.py`'s own rule that the claim is the only
+  source, never a request parameter, so there is nothing here for a
+  compromised frontend to override even if it tried.
+  Verified: `npm run build` (`tsc -b && vite build`) exits 0. Screenshotted
+  end to end via a headless-Chromium harness (Playwright, installed and
+  driven for this unit — see Session Notes) against `vite preview`: the
+  login screen renders with no console errors; submitting against the
+  unconfigured `.env.example` shows the "Dashboard is not configured"
+  message rather than a blank crash. A second, temporary harness
+  (`dev-preview.tsx`/`.html`, deleted before this entry was written — not
+  part of the app) rendered `AppointmentCard`, `EscalationCard`,
+  `Sidebar` and `TopBar` against fixture data: the scheduled/no-show
+  status badges, the warning-left-border escalation cards, the
+  live-call/background-scan source badges, and the per-appointment
+  activity toggle (expanding to show "reminder sent") all matched
+  `ui-context.md`. Fixed the opacity-modifier bug this same pass caught.
+  **Not verified, and cannot be yet**: a real Cognito sign-in, a real
+  `dashboard_api.py` response, and the resolve-escalation write path
+  against a live queue — all wait on the same blocked `cdk deploy` plus
+  Next Up #3's seeding that every other not-yet-verified item in this
+  tracker is blocked on (Session Notes).
+
 ## In Progress
 
 - None.
@@ -1701,15 +1808,18 @@ content, not agent code.
 2. Build the staff dashboard. Its Python half is done (see Completed):
    `tools/appointments.list_appointments_for_clinic` plus
    `lambda/dashboard_api.py`'s four routes over it and the three
-   existing escalation reads/write. Its CDK half (2a) is now done too
-   (see Completed): `api_stack.py` provisions the staff Cognito user
-   pool with its `custom:clinic_id` custom attribute, the REST API
-   Gateway's four routes behind a Cognito authorizer, and the Lambda
-   plus its scoped IAM role, all verified via `cdk synth`. What remains
-   is:
-   a. `frontend/src/dashboard/` — the Cognito login, appointment list
-      and escalation queue UI `ui-context.md` -> Layout Patterns
-      describes, now that a real API exists to call once deployed.
+   existing escalation reads/write. Its CDK half is done too (see
+   Completed): `api_stack.py` provisions the staff Cognito user pool
+   with its `custom:clinic_id` custom attribute, the REST API Gateway's
+   four routes behind a Cognito authorizer, and the Lambda plus its
+   scoped IAM role, all verified via `cdk synth`. Its UI half (2a) is
+   now done too (see Completed): `frontend/src/dashboard/` — Cognito
+   login, appointments view with an inline agent-activity log,
+   escalation queue with a detail modal and "Mark Resolved" — plus the
+   Vite/React/Tailwind/shadcn scaffolding under `frontend/` that this
+   was the first thing to need. `npm run build` passes and the UI was
+   screenshotted end to end (offline — no deployed API yet). What
+   remains is:
    b. The guest-identity Cognito **identity pool** for the patient-facing
       voice endpoint (`architecture.md` -> Auth and Access Model) is a
       separate, still-open piece — unrelated to the staff user pool just
@@ -2577,6 +2687,38 @@ content, not agent code.
   whole synchronous drive function. Worth reusing rather than
   rediscovering if another suite ever drives a FastAPI WebSocket route
   this way.
+
+- **Unlike the backend, this environment is not blocked on frontend
+  work.** Node 22 / npm 11 are present, `npm install` and `npm run build`
+  both reach the real npm registry with no proxy trouble
+  (`frontend/`'s first build, Next Up #2a), and Playwright's Chromium
+  could be downloaded and driven headless
+  (`npx playwright install chromium`, ~300 MB, then a local `npm install
+  playwright` — `chromium-cli` itself is not on this machine's `PATH`, so
+  a small Playwright script under the scratchpad directory was the
+  fallback the `run` skill's own playwright.md example names). That is
+  how the dashboard login screen and its components were actually
+  screenshotted rather than only type-checked. Worth reusing directly for
+  any future frontend unit instead of re-discovering the same fallback:
+  `npm run preview`/`npm run dev` in the background, poll the port, drive
+  it from a `.mjs` script with `chromium.launch()`, screenshot, read the
+  PNG back with the `Read` tool. Chromium's download persists at
+  `C:\Users\<user>\AppData\Local\ms-playwright\`, so only a fresh
+  `npm install playwright` in whatever scratchpad is current is needed
+  next time, not a re-download.
+
+- **Tailwind's opacity modifier does nothing on a bare `var()` arbitrary
+  value.** `bg-[var(--state-success)]/15` compiles with no error and
+  emits no CSS rule at all — Tailwind needs a color function it can
+  inject an alpha channel into, and a raw custom-property reference isn't
+  one. Silent, not a build failure, so it only surfaced by screenshotting
+  and noticing a badge had no background. Fixed in `frontend/src/index.css`
+  by precomputing light "wash" tint tokens instead
+  (`--bg-state-success-wash` etc.) and a separate `rgba()`-valued
+  `--overlay-scrim` for the one case (the modal backdrop) that has to
+  stay translucent over arbitrary content rather than a flat mixed color.
+  Worth checking for again if a future component reaches for `/NN` on a
+  `var(--...)` class.
 - **A `TypedEvent` (every Bidi event class) is a `dict` subclass**
   (`strands/types/_events.py`), which is what lets `agentcore_app.py`
   pass `websocket.send_json` directly as a `BidiAgent.run` output the

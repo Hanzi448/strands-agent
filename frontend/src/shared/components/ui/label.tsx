@@ -1,0 +1,23 @@
+import * as React from "react";
+import * as LabelPrimitive from "@radix-ui/react-label";
+
+import { cn } from "@/shared/lib/utils";
+
+// `ai-workflow-rules.md` -> Protected Files: shadcn-generated, regenerate
+// via the CLI rather than hand-editing.
+const Label = React.forwardRef<
+  React.ElementRef<typeof LabelPrimitive.Root>,
+  React.ComponentPropsWithoutRef<typeof LabelPrimitive.Root>
+>(({ className, ...props }, ref) => (
+  <LabelPrimitive.Root
+    ref={ref}
+    className={cn(
+      "text-sm font-medium text-[var(--text-primary)] peer-disabled:cursor-not-allowed peer-disabled:opacity-70",
+      className,
+    )}
+    {...props}
+  />
+));
+Label.displayName = LabelPrimitive.Root.displayName;
+
+export { Label };
