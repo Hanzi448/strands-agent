@@ -324,7 +324,14 @@ EventBridge, Bedrock, and SES are all pay-per-use managed services.
     with anonymous visitors.
 - **Staff**: authenticate via Amazon Cognito. One user pool, one
   demo account seeded per clinic. Dashboard API routes require a
-  valid Cognito-issued token.
+  valid Cognito-issued token. Each account carries its clinic as a
+  custom attribute, `custom:clinic_id`; API Gateway's Cognito
+  authorizer verifies the token and places its claims on
+  `requestContext.authorizer.claims` before the Lambda runs, and
+  `backend/lambda/dashboard_api.py` reads `clinic_id` from that claim
+  only — never from a path, query, or body parameter — so a request
+  cannot name a different clinic than the one the caller authenticated
+  as.
 - **Tenant isolation**: every tool function requires `clinic_id` as
   an explicit argument (derived from the active session, never
   inferred or optional) and every DynamoDB query/Bedrock KB query is

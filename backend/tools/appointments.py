@@ -39,6 +39,7 @@ to one winner rather than to whichever wrote last.
 
 from __future__ import annotations
 
+from datetime import timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -48,35 +49,48 @@ from .patients import find_patient, patient_summary
 from .scheduling import (
     clinic_timezone,
     get_clinic,
+    local_midnight,
     offerable_slots_for_date,
     resolve_service,
     unavailable_message,
 )
 from .schema import (
     APPOINTMENTS_BY_PATIENT_INDEX,
+    APPOINTMENTS_BY_START_TIME_INDEX,
     CLINIC_ID,
     CLINIC_PATIENT,
     DATE_FORMAT,
     LOCAL_TIME_FORMAT,
     AppointmentAttrs,
     AppointmentStatus,
+    ClinicAttrs,
     PatientAttrs,
     RescheduleActor,
     RescheduleEntry,
     ServiceAttrs,
     clinic_patient_key,
     from_iso8601,
+    to_iso8601,
     utc_now_iso,
 )
 from .validation import (
     MAX_IDENTIFIER_LENGTH,
     normalise_phone,
+    require_bounded_int,
     require_clinic_id,
+    require_date,
     require_enum,
     require_identifier,
     require_text,
     require_timestamp,
 )
+
+# How many appointments one `list_appointments_for_clinic` call returns.
+# A cap rather than pagination, for the reason `escalations.DEFAULT_ESCALATION_LIMIT`
+# is: the dashboard's list is a page a human scrolls (`ui-context.md` ->
+# Layout Patterns), not something reading a cursor.
+DEFAULT_APPOINTMENT_LIMIT = 50
+MAX_APPOINTMENT_LIMIT = 200
 
 # How many of a caller's appointments a "which one?" error names. A voice
 # agent reading more than this aloud has stopped being useful, and a caller
@@ -151,6 +165,103 @@ def upcoming_appointments_for_patient(
         if str(item.get(AppointmentAttrs.STATUS, "")) == AppointmentStatus.SCHEDULED.value
         and str(item.get(AppointmentAttrs.STARTS_AT, "")) >= now
     ]
+
+
+def list_appointments_for_clinic(
+    clinic_id: str, date: str | None = None, *, limit: object = None
+) -> dict[str, Any]:
+    """One clinic's appointments for one clinic-local day, soonest first.
+
+    `project-overview.md` -> Staff (dashboard): the dashboard's Appointments
+    view shows "today's appointments" -- today in the clinic's *own*
+    calendar, the same frame `check_availability` reads `hours`/`closures`
+    in, not the server's or the browser's. Every patient's booking that
+    day, not one patient's own history the way
+    `upcoming_appointments_for_patient` reads it.
+
+    Queries `by-start-time`, whose partition key is `clinic_id` itself, so
+    the read cannot reach another tenant (`architecture.md` -> Invariants
+    #1); the day's UTC window is built with `scheduling.local_midnight`,
+    the same helper `check_availability` uses, so a DST-transition day is
+    not silently an hour short here either.
+
+    Args:
+        clinic_id: The clinic to list. Required; never inferred or
+            defaulted -- the dashboard API derives it from the
+            authenticated staff member's own clinic, never from a request
+            parameter.
+        date: Which clinic-local day to list, as ``YYYY-MM-DD``. Omit for
+            the clinic's current local date -- what the dashboard opens on.
+        limit: Optional. How many to return at most, up to
+            `MAX_APPOINTMENT_LIMIT`; defaults to `DEFAULT_APPOINTMENT_LIMIT`.
+
+    Returns:
+        A dict with ``clinic_id``, ``date`` (the day actually listed,
+        clinic-local ``YYYY-MM-DD``), ``timezone`` (IANA), and
+        ``appointments``: whole `Appointments` items starting that day,
+        earliest first, any status -- a cancelled or no-show appointment is
+        still something staff review, unlike
+        `upcoming_appointments_for_patient`'s narrower read. Capped at
+        `limit`; no page cursor, as `list_open_escalations` -- nothing in
+        `ui-context.md` reads one.
+
+    Raises:
+        ValidationError: If `clinic_id` or `date` is missing/malformed, or
+            `limit` is not a whole number in range.
+        NotFoundError: If no clinic exists with that `clinic_id`.
+        ConfigurationError: If the clinic's stored timezone is unusable.
+    """
+    clinic_id = require_clinic_id(clinic_id)
+    wanted = require_bounded_int(
+        limit,
+        "limit",
+        minimum=1,
+        maximum=MAX_APPOINTMENT_LIMIT,
+        default=DEFAULT_APPOINTMENT_LIMIT,
+    )
+
+    clinic = get_clinic(clinic_id)
+    zone = clinic_timezone(clinic)
+    local_date = (
+        require_date(date, "date")
+        if date is not None
+        else from_iso8601(utc_now_iso()).astimezone(zone).date()
+    )
+
+    # Lazy, mirroring `dynamo._dynamodb_resource`: importing this module
+    # must not require the AWS SDK.
+    from boto3.dynamodb.conditions import Key  # noqa: PLC0415
+
+    condition = Key(CLINIC_ID).eq(clinic_id) & Key(AppointmentAttrs.STARTS_AT).between(
+        to_iso8601(local_midnight(local_date, zone)),
+        to_iso8601(local_midnight(local_date + timedelta(days=1), zone)),
+    )
+
+    table = appointments_table()
+    query: dict[str, Any] = {
+        "IndexName": APPOINTMENTS_BY_START_TIME_INDEX,
+        "KeyConditionExpression": condition,
+    }
+    items: list[dict[str, Any]] = []
+    while True:
+        response = table.query(**query)
+        items.extend(response.get("Items", []))
+        next_key = response.get("LastEvaluatedKey")
+        # The cap is applied here, not passed to DynamoDB as `Limit` (which
+        # counts items *scanned*), for the same reason
+        # `escalations.list_open_escalations` applies its cap after the
+        # status filter.
+        if not next_key or len(items) >= wanted:
+            break
+        query["ExclusiveStartKey"] = next_key
+    items.sort(key=lambda item: str(item.get(AppointmentAttrs.STARTS_AT, "")))
+
+    return {
+        CLINIC_ID: clinic_id,
+        "date": local_date.strftime(DATE_FORMAT),
+        "timezone": clinic.get(ClinicAttrs.TIMEZONE),
+        "appointments": items[:wanted],
+    }
 
 
 def appointment_history_for_patient(

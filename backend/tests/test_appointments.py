@@ -966,3 +966,120 @@ def test_find_upcoming_appointments_pages(tables) -> None:
     store.query = paged  # type: ignore[method-assign]
     found = appointments.find_upcoming_appointments(DENTAL_ID, PHONE, NAME)
     assert [item["appointment_id"] for item in found] == ["apt_one"]
+
+
+# --------------------------------------------------------------------------
+# The dashboard's clinic-wide, one-day list
+# --------------------------------------------------------------------------
+
+# NINE and TEN are both 2026-07-01 local for the dental clinic (BST, so
+# 08:00Z/09:00Z are 09:00/10:00 local); NEXT_DAY_TEN is the day after.
+JULY_FIRST = "2026-07-01"
+JULY_SECOND = "2026-07-02"
+
+
+@pytest.mark.parametrize("clinic_id", ["", "   ", None])
+def test_list_appointments_blank_clinic_id_fails_before_any_read(clinic_id, tables) -> None:
+    clinics, store, _ = tables(appointment_items=one_checkup())
+    with pytest.raises(ValidationError):
+        appointments.list_appointments_for_clinic(clinic_id, JULY_FIRST)
+    assert clinics.requested == []
+    assert store.queries == []
+
+
+def test_list_appointments_unknown_clinic_is_not_found(tables) -> None:
+    tables(appointment_items=[], clinics=FakeClinicsTable(dental_clinic()))
+    with pytest.raises(NotFoundError):
+        appointments.list_appointments_for_clinic("clinic-nope", JULY_FIRST)
+
+
+def test_list_appointments_is_scoped_to_the_requested_clinic(tables) -> None:
+    """`architecture.md` -> Invariants #1: the query cannot reach another tenant."""
+    _, store, _ = tables(
+        appointment_items=[
+            booked("apt_dental", NINE, NINE_FIFTEEN),
+            booked("apt_cosmetic", NINE, NINE_FIFTEEN, clinic_id=COSMETIC_ID),
+        ]
+    )
+    result = appointments.list_appointments_for_clinic(DENTAL_ID, JULY_FIRST)
+    assert [item["appointment_id"] for item in result["appointments"]] == ["apt_dental"]
+    assert result["clinic_id"] == DENTAL_ID
+    assert result["date"] == JULY_FIRST
+    assert result["timezone"] == "Europe/London"
+
+    assert store.queries[0]["IndexName"] == "by-start-time"
+    condition = store.queries[0]["KeyConditionExpression"].get_expression()
+    assert condition["operator"] == "AND"
+
+
+def test_list_appointments_returns_soonest_first_any_status(tables) -> None:
+    _, store, _ = tables(
+        appointment_items=[
+            booked("apt_two", TEN, "2026-07-01T09:15:00Z", status="cancelled"),
+            booked("apt_one", NINE, NINE_FIFTEEN),
+        ]
+    )
+    result = appointments.list_appointments_for_clinic(DENTAL_ID, JULY_FIRST)
+    # A cancelled appointment is still listed -- unlike
+    # `upcoming_appointments_for_patient`, this is a review list, not a
+    # "what can this caller still change" one.
+    assert [item["appointment_id"] for item in result["appointments"]] == [
+        "apt_one",
+        "apt_two",
+    ]
+
+
+def test_list_appointments_a_different_days_appointment_is_excluded(tables) -> None:
+    tables(
+        appointment_items=[
+            booked("apt_first", NINE, NINE_FIFTEEN),
+            booked("apt_second", NEXT_DAY_TEN, "2026-07-02T09:15:00Z"),
+        ]
+    )
+    first_day = appointments.list_appointments_for_clinic(DENTAL_ID, JULY_FIRST)
+    assert [item["appointment_id"] for item in first_day["appointments"]] == ["apt_first"]
+
+    second_day = appointments.list_appointments_for_clinic(DENTAL_ID, JULY_SECOND)
+    assert [item["appointment_id"] for item in second_day["appointments"]] == ["apt_second"]
+
+
+def test_list_appointments_defaults_to_the_clinics_current_local_date(tables) -> None:
+    """No `date` given -- the dashboard opens on "today", clinic-local.
+
+    `now` (2026-06-30T12:00:00Z) is 2026-06-30 local for the dental
+    clinic; NINE, the day after, must not appear in the default listing.
+    """
+    _, store, _ = tables(
+        appointment_items=[
+            booked("apt_today", "2026-06-30T11:00:00Z", "2026-06-30T11:15:00Z"),
+            booked("apt_tomorrow", NINE, NINE_FIFTEEN),
+        ],
+        now=NOW,
+    )
+    result = appointments.list_appointments_for_clinic(DENTAL_ID)
+    assert result["date"] == "2026-06-30"
+    assert [item["appointment_id"] for item in result["appointments"]] == ["apt_today"]
+
+
+def test_list_appointments_limit_caps_the_result(tables) -> None:
+    tables(
+        appointment_items=[
+            booked("apt_one", NINE, NINE_FIFTEEN),
+            booked("apt_two", TEN, "2026-07-01T09:15:00Z"),
+        ]
+    )
+    result = appointments.list_appointments_for_clinic(DENTAL_ID, JULY_FIRST, limit=1)
+    assert [item["appointment_id"] for item in result["appointments"]] == ["apt_one"]
+
+
+@pytest.mark.parametrize("limit", [0, -1, 201, "not-a-number"])
+def test_list_appointments_limit_out_of_range_is_rejected(limit, tables) -> None:
+    tables(appointment_items=one_checkup())
+    with pytest.raises(ValidationError):
+        appointments.list_appointments_for_clinic(DENTAL_ID, JULY_FIRST, limit=limit)
+
+
+def test_list_appointments_unparseable_date_is_rejected(tables) -> None:
+    tables(appointment_items=one_checkup())
+    with pytest.raises(ValidationError):
+        appointments.list_appointments_for_clinic(DENTAL_ID, "not-a-date")

@@ -71,6 +71,14 @@ Update this file after every meaningful implementation change.
   `cdk deploy` and a real send remain, blocked in this environment for
   the same reason Next Up #1 is (Session Notes) — folded into the new
   Next Up #1 and #3 respectively rather than kept as their own item.
+- **The dashboard API's Python half has landed.** `tools/appointments.py`
+  gained `list_appointments_for_clinic` (the clinic-wide read the
+  Appointments screen needs; every existing appointment read was
+  per-patient) and `lambda/dashboard_api.py` is now a real module: four
+  routes over it and the three existing escalation reads/write, Cognito
+  claim scoping, and the `{data, error}` response shape
+  `code-standards.md` requires. What is left of Next Up #2 is
+  infrastructure and UI, not Python — see Next Up and Completed.
 
 ## Current Goal
 
@@ -97,8 +105,14 @@ Update this file after every meaningful implementation change.
   model-facing surface over functions the background Lambda will call
   directly. The background job, including its CDK half, is now entirely
   done (see Completed) — its own remaining step is the same blocked
-  deploy as Next Up #1's. Next up: AgentCore deploy, the staff
-  dashboard, and the seed scripts.
+  deploy as Next Up #1's. The staff dashboard's Python half (the new
+  clinic-wide appointment read, and `dashboard_api.py`'s four routes) is
+  now done too (see Completed); what is left of it is `api_stack.py`
+  (API Gateway, the Cognito user pool, and its `custom:clinic_id` custom
+  attribute) and `frontend/src/dashboard/`, split apart per
+  `ai-workflow-rules.md` -> When to Split Work (infra and frontend are
+  each their own step, and neither is Python). Next up: AgentCore
+  deploy, the dashboard's CDK and UI, and the seed scripts.
 
 ## Completed
 
@@ -1469,6 +1483,96 @@ Update this file after every meaningful implementation change.
   real inbox, which needs Next Up #1 (the environment-blocked deploy) and
   #3 (seed, for a verified SES identity and real appointments to scan).
 
+- **The staff dashboard API's Python half: `list_appointments_for_clinic`
+  and `lambda/dashboard_api.py`** (Next Up #2, first of three split
+  units — infra and frontend are next, per `ai-workflow-rules.md` ->
+  When to Split Work). The first code any staff-facing screen will call.
+  **One new tool function, no schema change.** Every existing appointment
+  read in `tools/appointments.py` answers "what can this *caller*
+  change?" — scoped to one patient, via `find_patient` or a `patient_id`
+  already in hand. The dashboard's Appointments list needs the opposite:
+  every booking at the clinic, for a person who has no patient identity
+  to start from. `project-overview.md` -> Staff (dashboard) fixes the
+  scope as "today's appointments", so `list_appointments_for_clinic`
+  is a **one clinic-local day** read, not an unbounded one — today by
+  default, or an explicit `date` — mirroring `check_availability`'s own
+  local-day framing rather than inventing a second one:
+  `scheduling.local_midnight` (promoted from private, the same way
+  `unavailable_message` was, since this is now its second caller) builds
+  the day's UTC window so a DST-transition day is not silently an hour
+  short here either, and the query goes straight at `by-start-time`
+  without `scheduling._booked_spans`'s status filter — a cancelled or
+  no-show appointment is still something staff review, unlike an
+  availability check. Capped after the fetch the way
+  `list_open_escalations` already is, rather than passed to DynamoDB as
+  `Limit` (`DEFAULT_APPOINTMENT_LIMIT` = 50, `MAX_APPOINTMENT_LIMIT` =
+  200). The return is a dict (`clinic_id`, `date`, `timezone`,
+  `appointments`) rather than a bare list, so a dashboard that opens with
+  no `date` can still show which day it is looking at — the same reason
+  `check_availability` echoes `date`/`days_checked` rather than only
+  returning `slots`. `AppointmentAttrs.PATIENT_NAME` being denormalised
+  onto every appointment (an existing decision) means the list needs no
+  second read per row to be useful.
+  **`dashboard_api.py` holds no logic of its own**, for the reason
+  `background_scan.py` holds none of `tools.automation`'s
+  (`code-standards.md` -> General): a plain `(httpMethod, resource)` dict
+  routes to one of four functions, each forwarding straight into
+  `tools/appointments.py` or `tools/escalations.py`. No new tool was
+  needed for the three escalation routes — `list_open_escalations`,
+  `get_escalation`, `resolve_escalation` already existed, written ahead
+  of any caller back when the escalation module landed.
+  **`clinic_id` comes from the Cognito token and nowhere else** — see the
+  Architecture Decision above and the synced line in `architecture.md` ->
+  Auth and Access Model. `_clinic_id_from` reads `custom:clinic_id` off
+  `requestContext.authorizer.claims`; no route function's signature
+  accepts a `clinic_id` from the request, so there is no parameter a
+  compromised or careless frontend could set to reach another clinic's
+  data — asserted by a test that plants a different `clinic_id` in the
+  query string and checks it never reaches the tool layer.
+  **Every response is `{data, error}`**, per `code-standards.md` -> API
+  Routes. A `ToolError` keeps its own message — these are already
+  written for a human reader, staff rather than a patient, so nothing
+  here paraphrases `tools/`'s own words — and is mapped to a status by
+  `_STATUS_BY_ERROR` (400/404/409/500). Anything that is not a `ToolError`
+  is logged in full and replaced with one fixed message, the same
+  contrast `agents/results.py` draws for the voice path: a KeyError with
+  an internal attribute path is a CloudWatch fact, not a dashboard one. A
+  `Decimal` (every stored duration/count) is encoded through a small
+  `json.JSONEncoder` rather than reaching `json.dumps` raw, which is
+  exactly the failure Session Notes already records for the *voice* path
+  (Strands' fallback to `repr` on a tool result) — the same class of bug,
+  caught here before a browser ever sees it.
+  **Route paths are fixed now, by this module, not invented later.**
+  `GET /appointments`, `GET /escalations`, `GET /escalations/{escalation_id}`,
+  `POST /escalations/{escalation_id}/resolve` — `_ROUTES`' keys are the
+  literal contract `api_stack.py`'s API Gateway resources must match
+  (Next Up #2a).
+  Verified: `pytest` from `backend/` — **719 passed** (688 before, 31
+  new), the pre-existing 688 unchanged; nothing outside
+  `tools/appointments.py`, `tools/scheduling.py` (the `local_midnight`
+  rename) and the two new/touched test files was touched.
+  `tools/appointments.py`'s new function is driven against the
+  same `FakeAppointmentStore` `test_appointments.py` already uses for
+  reschedule/cancel — clinic scoping (another clinic's appointment is
+  invisible), soonest-first ordering across any status within a day, a
+  different calendar day's appointment excluded, the default resolving
+  to the clinic's current local date (asserted against a monkeypatched
+  "now" the way every other "upcoming" read in this module is), an
+  unknown clinic, a malformed date, and the limit's bounds. `dashboard_api.py`
+  is tested the same thin way `test_background_scan.py` tests its Lambda
+  — every tool-layer call monkeypatched, nothing built against a fake
+  table here — covering all four routes' argument forwarding, a missing
+  or blank Cognito claim, a smuggled `clinic_id` in the query string
+  being ignored, an unknown route (404), a missing path parameter
+  reaching the real (unmocked) `get_escalation` and failing as
+  `ValidationError`, each `ToolError` subtype's status and verbatim
+  message, an unexpected exception never reaching the response as raw
+  text, and `Decimal` serialising cleanly.
+  **Not verified, and cannot be yet**: anything through a real API
+  Gateway or a real Cognito token — that needs Next Up #2a, which fixes
+  these route paths and the `custom:clinic_id` attribute into actual AWS
+  resources.
+
 ## In Progress
 
 - None.
@@ -1515,9 +1619,22 @@ content, not agent code.
    Docker and no AWS credentials are usable here for anything beyond
    local, offline work, so this item needs a session (or a person) that
    actually has both.
-2. Build the staff dashboard (Cognito auth, appointment list,
-   escalation queue). Its escalation reads are already written —
-   `list_open_escalations`, `get_escalation`, `resolve_escalation`.
+2. Build the staff dashboard. Its Python half is done (see Completed):
+   `tools/appointments.list_appointments_for_clinic` plus
+   `lambda/dashboard_api.py`'s four routes over it and the three
+   existing escalation reads/write. What remains is two separate steps
+   (`ai-workflow-rules.md` -> When to Split Work):
+   a. `api_stack.py` — the Cognito user pool (one demo account per
+      clinic, each carrying `custom:clinic_id` as documented in
+      `architecture.md` -> Auth and Access Model), the REST API Gateway
+      wired to `dashboard_api.py` with a Cognito authorizer, and the
+      four routes' resource paths (`/appointments`,
+      `/escalations`, `/escalations/{escalation_id}`,
+      `/escalations/{escalation_id}/resolve`) as `dashboard_api.py`
+      itself expects them.
+   b. `frontend/src/dashboard/` — the Cognito login, appointment list
+      and escalation queue UI `ui-context.md` -> Layout Patterns
+      describes, once (a) exists to call.
 3. Seed the two demo clinics (dental, cosmetic) with config,
    sample appointments, and FAQ documents for the Knowledge Base.
    Settle the phone-number country-code question below first: this is
@@ -2116,6 +2233,30 @@ content, not agent code.
   until enough open items are found costs reads only when the queue is
   mostly resolved, whereas a composite status key costs write
   complexity on every escalation.
+
+- **A staff member's clinic reaches the dashboard API as a Cognito
+  custom attribute, `custom:clinic_id`, never as a request parameter.**
+  `architecture.md` -> Auth and Access Model said routes are "scoped to
+  the authenticated staff member's clinic" without saying how the token
+  carries that. One user pool with one demo account per clinic
+  (`architecture.md` -> Stack) means each seeded account can simply carry
+  its own clinic as a custom attribute; API Gateway's Cognito authorizer
+  puts every verified claim on `requestContext.authorizer.claims` before
+  the Lambda runs, so `dashboard_api._clinic_id_from` reads it from
+  there and `backend/tools/` is called with exactly that value — a path
+  parameter or query string never supplies or overrides it. The
+  alternative (a `clinic_id` request parameter, checked against the
+  token) would make a cross-tenant request *expressible* and rely on a
+  check to refuse it, the same shape of hole
+  `architecture.md` -> Invariants #1 already rules out for the query
+  layer. Seeding that attribute onto each demo account is now part of
+  Next Up #3.
+- **The dashboard Lambda routes on a plain `(method, resource)` dict, not
+  a framework.** `dashboard_api.py` is a single Lambda behind API Gateway
+  proxy integration; four routes did not justify a router dependency, and
+  `resource` (API Gateway's route *template*, e.g.
+  `/escalations/{escalation_id}`) keeps the table's size fixed rather
+  than growing with every id ever requested.
 
 ## Session Notes
 

@@ -180,8 +180,8 @@ def check_availability(
         # round trip as an afternoon -- which is the point of `days`.
         booked = _booked_spans(
             clinic_id,
-            _local_midnight(open_days[0].date, zone),
-            _local_midnight(open_days[-1].date + _ONE_DAY, zone),
+            local_midnight(open_days[0].date, zone),
+            local_midnight(open_days[-1].date + _ONE_DAY, zone),
         )
 
     slots: list[dict[str, str]] = []
@@ -273,8 +273,8 @@ def offerable_slots_for_date(
     )
     booked = _booked_spans(
         clinic_id,
-        _local_midnight(local_date, zone),
-        _local_midnight(local_date + _ONE_DAY, zone),
+        local_midnight(local_date, zone),
+        local_midnight(local_date + _ONE_DAY, zone),
         exclude_appointment_id=exclude_appointment_id,
     )
     return _compute_slots(
@@ -310,13 +310,18 @@ def _day_plan(
     return _DayPlan(local_date, opening_intervals(clinic, local_date, zone), None)
 
 
-def _local_midnight(local_date: date_type, zone: ZoneInfo) -> datetime:
+def local_midnight(local_date: date_type, zone: ZoneInfo) -> datetime:
     """The instant a clinic-local calendar day begins, as UTC.
 
     Always built by combining a *date* with midnight rather than by adding
     24 hours to the previous day's start: on a DST-transition day the two
     differ by an hour, and using the latter as a window's end would hide the
     last hour of a clinic's day from the appointments query.
+
+    Public rather than private: `tools.appointments.list_appointments_for_clinic`
+    needs the same one-day window this module already builds for
+    `check_availability`, promoted rather than copied for the reason
+    `unavailable_message` was.
     """
     return datetime.combine(local_date, datetime.min.time(), tzinfo=zone).astimezone(
         timezone.utc
