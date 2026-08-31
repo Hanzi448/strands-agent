@@ -58,14 +58,19 @@ Update this file after every meaningful implementation change.
   the way in, naming the cause. So the four system prompts remain
   unjudged by anything but a script, no audio has been heard, and every
   latency number `mic.py` was built to print is still unmeasured.
-- **The background job's whole decision now exists, and it is code, not
-  a plan.** `tools/automation.py` (`run_daily_scan`) and
-  `lambda/background_scan.py` implement Next Up #2's Python half: per
-  upcoming appointment, escalate a patient's own no-show history to staff
-  or send a reminder — never both, never an automatic reschedule (a
-  product decision the user made this session; see Completed). What
-  remains of #2 is purely CDK: an EventBridge Scheduler entry per clinic
-  and a deployed `Lambda` resource, now the new Next Up #2.
+- **The background job is now finished, code and CDK both.**
+  `tools/automation.py` (`run_daily_scan`) and
+  `lambda/background_scan.py` were the Python half: per upcoming
+  appointment, escalate a patient's own no-show history to staff or send
+  a reminder — never both, never an automatic reschedule (a product
+  decision the user made this session; see Completed).
+  `automation_stack.py` is now the CDK half: one Lambda packaging just
+  `lambda/` and `tools/`, and one EventBridge Scheduler schedule per
+  demo clinic, each firing that same Lambda with its own `clinic_id`.
+  `cdk synth` verifies it end to end (see Completed); only the actual
+  `cdk deploy` and a real send remain, blocked in this environment for
+  the same reason Next Up #1 is (Session Notes) — folded into the new
+  Next Up #1 and #3 respectively rather than kept as their own item.
 
 ## Current Goal
 
@@ -80,7 +85,7 @@ Update this file after every meaningful implementation change.
   **actually deploying it** (a container build/push and real stack
   creation, both blocked in this environment -- Session Notes) and
   **pointing any interface at something real**
-  (credentials plus seeded clinics, #5). That second one is the
+  (credentials plus seeded clinics, #3). That second one is the
   bottleneck for three open questions at once — who greets the patient
   and what it costs in dead air, which voice each clinic answers in,
   and which text model the sub-agents reason with — plus one fact no
@@ -90,11 +95,10 @@ Update this file after every meaningful implementation change.
   Nothing in `backend/tools/` may move into an agent definition
   (`architecture.md` -> Invariants #3): the agents are a thin
   model-facing surface over functions the background Lambda will call
-  directly. The background job's own decision logic is now written and
-  tested (`tools/automation.py`, Next Up #2's old blocker resolved — see
-  Completed); what is left of it is CDK, not Python. Next up: AgentCore
-  deploy, the background job's EventBridge/Lambda wiring, the dashboard,
-  and the seed scripts.
+  directly. The background job, including its CDK half, is now entirely
+  done (see Completed) — its own remaining step is the same blocked
+  deploy as Next Up #1's. Next up: AgentCore deploy, the staff
+  dashboard, and the seed scripts.
 
 ## Completed
 
@@ -1402,6 +1406,69 @@ Update this file after every meaningful implementation change.
   the right sensitivity against real seeded data, which needs Next Up #4
   (seed) before it can be judged rather than argued.
 
+- **`automation_stack.py`: the EventBridge schedule and the background
+  Lambda** (old Next Up #2, now finished). The CDK half of the background
+  job — the same "code first, deploy second" split `agentcore_app.py`/
+  `agent_stack.py` went through — over `tools/automation.py` and
+  `lambda/background_scan.py`, both already done and tested (see above).
+  **The Lambda's code asset is `lambda/` and `tools/` only.** A plain
+  `lambda_.Code.from_asset(_BACKEND_DIR, exclude=[...])` over a source
+  zip, not a Docker asset and not `aws-lambda-python-alpha` bundling:
+  `tools/automation.py` reaches only `boto3` (already in the Lambda
+  Python runtime) and the standard library, so there is no dependency to
+  bundle. `exclude` keeps `agents/`, `infra/`, `tests/`, `.venv/`, and
+  `__pycache__` out of the zip, mirroring the restriction `Dockerfile`
+  already applies to the AgentCore container's own `COPY agents/
+  tools/` — verified by inspecting the staged `cdk.out/asset.*`
+  directory directly rather than trusting the exclude list read
+  correctly.
+  **One `AWS::Scheduler::Schedule` per demo clinic**, each a `rate(1
+  day)` expression targeting the same Lambda with its own
+  `{"clinic_id": ...}` JSON input (`architecture.md` -> Invariants #1) —
+  the plain `aws_scheduler.CfnSchedule` L1 construct, since no L2 alpha
+  module is a dependency here and one stack's IAM/target shape is a small
+  enough surface not to need one. One `SchedulerExecutionRole`, scoped to
+  `lambda:InvokeFunction` on this one function's ARN, is shared by both
+  schedules rather than one role each.
+  **The execution role's DynamoDB grants are scoped per module, not per
+  table wholesale** — checked against the actual calls each one makes:
+  `GetItem` only on `Clinics` (`scheduling.get_clinic`) and `Patients`
+  (`patients.get_patient`, which reads a `patient_id` already in hand and
+  never looks up by phone); `Query` (plus `/index/*`) and `UpdateItem` on
+  `Appointments` (`appointment_history_for_patient`'s `by-patient` query,
+  `_scheduled_starting_within`'s `by-start-time` query, and
+  `_record_reminder`'s write onto the same item); `PutItem` only on
+  `Escalations`, since the only escalation path this job takes is
+  `create_escalation`. `ses:SendEmail`/`ses:SendRawEmail` are scoped to
+  `arn:aws:ses:{region}:{account}:identity/*` — a resource *type*, not
+  `*` outright, the same tradeoff `agent_stack.py` already documents for
+  `bedrock:InvokeModel` against `foundation-model/*`: the verified sender
+  identity is created manually outside CDK (Session Notes), so its exact
+  ARN cannot be pinned at synth time, but the grant still stops short of
+  every SES action on every resource (`code-standards.md` -> AWS CDK).
+  `CLINICPILOT_REMINDER_SENDER_EMAIL` is deliberately left unset on the
+  function's environment — no identity is verified yet — rather than
+  invented; setting it is now folded into Next Up #3 (seed).
+  Verified: `npx aws-cdk@2 synth` exits 0 with all five stacks
+  (no Docker, no AWS credentials needed for a source-zip Lambda asset any
+  more than for the Docker asset `agent_stack.py` already synthesises
+  without them); the Automation template carries exactly one
+  `AWS::Lambda::Function`, its role and policy, one scheduler role, and
+  two `AWS::Scheduler::Schedule` resources (`DentalDailyScanSchedule`,
+  `CosmeticDailyScanSchedule`) each with the right `rate(1 day)`
+  expression and per-clinic JSON input; the policy document was read back
+  and diffed against the module-by-module grant list above line for
+  line; the staged Lambda asset directory was inspected directly and
+  contains only `lambda/`, `tools/`, and `requirements.txt` — no
+  `agents/`, `infra/`, `tests/`, or `__pycache__`. `pytest` from
+  `backend/` — **688 passed**, unchanged (this unit touched no Python
+  under `backend/tools/`, `backend/lambda/`, or `backend/agents/`).
+  **Not verified, and cannot be yet**: an actual `cdk deploy` (this
+  environment has neither Docker nor AWS credentials — Session Notes),
+  and therefore whether the deployed schedule really fires and reaches a
+  real inbox, which needs Next Up #1 (the environment-blocked deploy) and
+  #3 (seed, for a verified SES identity and real appointments to scan).
+
 ## In Progress
 
 - None.
@@ -1418,7 +1485,7 @@ Dockerfile half, `agent_stack.py`'s AgentCore Runtime, are both in
 Completed below. What remains of #1 is now purely the deploy action
 itself — a `cdk deploy` needing Docker and AWS credentials this
 environment has neither of — and the real call that follows it, which is
-why **#4 (seed) unblocks more than its position suggests**: it is what
+why **#3 (seed) unblocks more than its position suggests**: it is what
 turns either interface, and soon the deployed one, from a program that
 runs into a call someone can listen to, and it is where the greeting,
 voice and text-model questions get answered.
@@ -1448,29 +1515,19 @@ content, not agent code.
    Docker and no AWS credentials are usable here for anything beyond
    local, offline work, so this item needs a session (or a person) that
    actually has both.
-2. Wire `backend/lambda/background_scan.py` into `automation_stack.py`:
-   an EventBridge Scheduler schedule per seeded clinic (each with its own
-   `{"clinic_id": ...}` input — Invariants #1), a deployed `Lambda`
-   resource for the handler, and an execution role scoped to that
-   Lambda's own needs (the four DynamoDB tables `backend/tools/` reaches,
-   plus `ses:SendEmail`, scoped to the verified sender identity once one
-   exists — `code-standards.md` -> AWS CDK forbids a blanket resource/
-   action grant). The Python logic and its own tests are done (see
-   Completed, `tools/automation.py` + `lambda/background_scan.py`) — this
-   is now purely the CDK half, the same split `agentcore_app.py`/
-   `agent_stack.py` went through. `CLINICPILOT_REMINDER_SENDER_EMAIL`
-   needs setting on the Lambda's environment once a sender identity is
-   verified in SES.
-3. Build the staff dashboard (Cognito auth, appointment list,
+2. Build the staff dashboard (Cognito auth, appointment list,
    escalation queue). Its escalation reads are already written —
    `list_open_escalations`, `get_escalation`, `resolve_escalation`.
-4. Seed the two demo clinics (dental, cosmetic) with config,
+3. Seed the two demo clinics (dental, cosmetic) with config,
    sample appointments, and FAQ documents for the Knowledge Base.
    Settle the phone-number country-code question below first: this is
    the step that fixes a number format. Also what will let
    `NO_SHOW_RISK_THRESHOLD` (`tools/automation.py`) be judged against real
-   data rather than argued about.
-5. Architecture diagram, README, demo video, submission assets.
+   data rather than argued about. Also what a verified SES sender
+   identity needs to exist for, so `CLINICPILOT_REMINDER_SENDER_EMAIL`
+   can finally be set on the background scan Lambda's environment
+   (`automation_stack.py`, Next Up's old #2) — see Session Notes.
+4. Architecture diagram, README, demo video, submission assets.
 
 ## Open Questions
 

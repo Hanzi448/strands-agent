@@ -61,6 +61,10 @@ def main() -> None:
         app,
         config.stack_name("automation"),
         description="ClinicPilot automation: daily appointment scan on EventBridge + Lambda.",
+        clinics_table=data.clinics_table,
+        patients_table=data.patients_table,
+        appointments_table=data.appointments_table,
+        escalations_table=data.escalations_table,
         **common,
     )
 
