@@ -15,9 +15,10 @@ Completed); this stack only wires them up:
     attribute's claim name itself, so the attribute is declared here
     without it and read there with it. This pool is entirely separate
     from the patient-facing Cognito *identity* pool (guest credentials
-    for the voice endpoint, provisioned alongside `frontend_stack.py`):
-    staff authentication must not share a credential path with anonymous
-    visitors (`architecture.md` -> Invariants #5).
+    for the voice endpoint, provisioned by this same stack's own
+    `_build_patient_guest_identity`, below): staff authentication must not
+    share a credential path with anonymous visitors
+    (`architecture.md` -> Invariants #5).
     **Seeding the two demo accounts themselves is Next Up #3, not this
     unit** (`progress-tracker.md` -> Architecture Decisions, "Seeding
     that attribute onto each demo account is now part of Next Up #3"): a
@@ -48,6 +49,32 @@ Completed); this stack only wires them up:
     `UpdateItem` for `get_escalation`/`resolve_escalation`
     (`code-standards.md` -> AWS CDK forbids a blanket resource/action
     grant).
+  - The patient-facing guest-identity **Cognito identity pool**
+    (`progress-tracker.md` Next Up #2b, `architecture.md` -> Auth and
+    Access Model). Assigned to this stack rather than `frontend_stack.py`
+    (the other candidate the AgentCore item's own docstring named): it
+    needs the AgentCore Runtime's ARN to scope the guest role's invoke
+    grant, `api_stack.py` already takes a stack dependency on
+    `agent_stack.py` for exactly that reason, and `frontend_stack.py` is
+    still an empty skeleton with nothing to hang this on. **Unauthenticated
+    identities only** -- `allow_unauthenticated_identities=True` and no
+    Cognito user-pool provider attached, since a patient never signs in
+    (`architecture.md` -> Auth and Access Model: "no patient
+    authentication -- no accounts, no login"). This pool is entirely
+    separate from the `StaffUserPool` above: an anonymous visitor's guest
+    role must never share a credential path with a staff login
+    (`architecture.md` -> Invariants #5), so it is its own
+    `CfnIdentityPool` with its own role attachment, not a second client on
+    the staff pool.
+    The guest role gets exactly one grant: `runtime.grant_invoke_runtime`
+    on the AgentCore Runtime this stack is handed, which is the L2
+    construct's own scoped-`bedrock-agentcore:InvokeAgentRuntime` grant
+    (not the broader `grant_invoke`, which also grants
+    `InvokeAgentRuntimeForUser` -- a per-user on-behalf-of header this
+    build never sets). No DynamoDB, S3, or Bedrock-model grant is ever
+    added to this role: every data path stays behind the agent
+    (`architecture.md` -> Invariants #5), which is what makes a role
+    "handed to every visitor" safe to hand to every visitor.
 
 CORS is wide open (`default_cors_preflight_options`, all origins/methods)
 because the frontend's own origin does not exist yet
@@ -62,6 +89,7 @@ from pathlib import Path
 
 from aws_cdk import CfnOutput, Duration, RemovalPolicy, Stack
 from aws_cdk import aws_apigateway as apigateway
+from aws_cdk import aws_bedrockagentcore as agentcore
 from aws_cdk import aws_cognito as cognito
 from aws_cdk import aws_dynamodb as dynamodb
 from aws_cdk import aws_iam as iam
@@ -113,6 +141,7 @@ class ApiStack(Stack):
         config: ProjectConfig,
         appointments_table: dynamodb.ITableV2,
         escalations_table: dynamodb.ITableV2,
+        agent_runtime: agentcore.Runtime,
         **kwargs,
     ) -> None:
         super().__init__(scope, construct_id, **kwargs)
@@ -126,6 +155,9 @@ class ApiStack(Stack):
             escalations_table=escalations_table,
         )
         self.api = self._build_api()
+        self.guest_identity_pool, self.guest_role = self._build_patient_guest_identity(
+            agent_runtime
+        )
 
     def _build_user_pool(self) -> tuple[cognito.UserPool, cognito.UserPoolClient]:
         """Staff-only user pool, `custom:clinic_id` scoping every account.
@@ -282,3 +314,68 @@ class ApiStack(Stack):
         )
 
         return api
+
+    def _build_patient_guest_identity(
+        self, agent_runtime: agentcore.Runtime
+    ) -> tuple[cognito.CfnIdentityPool, iam.Role]:
+        """Guest-only Cognito identity pool for the patient-facing voice endpoint.
+
+        No `cognito_identity_providers`: this pool never authenticates
+        anyone, it only ever issues unauthenticated (guest) identities, so
+        there is no user pool to link it to -- unlike `StaffUserPool`
+        above, which exists precisely to authenticate someone.
+        """
+        identity_pool = cognito.CfnIdentityPool(
+            self,
+            "PatientGuestIdentityPool",
+            identity_pool_name=self.config.resource_name("patient-guest-identity"),
+            allow_unauthenticated_identities=True,
+        )
+
+        # `sts:AssumeRoleWithWebIdentity` federated via Cognito, restricted
+        # to this identity pool and to its *unauthenticated* role slot --
+        # the same shape a Cognito-authenticated role takes, but for the
+        # `amr: unauthenticated` claim rather than `authenticated`.
+        guest_role = iam.Role(
+            self,
+            "PatientGuestRole",
+            role_name=self.config.resource_name("patient-guest"),
+            assumed_by=iam.FederatedPrincipal(
+                "cognito-identity.amazonaws.com",
+                conditions={
+                    "StringEquals": {
+                        "cognito-identity.amazonaws.com:aud": identity_pool.ref
+                    },
+                    "ForAnyValue:StringLike": {
+                        "cognito-identity.amazonaws.com:amr": "unauthenticated"
+                    },
+                },
+                assume_role_action="sts:AssumeRoleWithWebIdentity",
+            ),
+        )
+
+        # The only grant this role ever gets. `architecture.md` ->
+        # Invariants #5: a role handed to every anonymous visitor must
+        # reach nothing but the agent runtime -- no DynamoDB, S3, or
+        # Bedrock-model grant belongs here, ever.
+        agent_runtime.grant_invoke_runtime(guest_role)
+
+        cognito.CfnIdentityPoolRoleAttachment(
+            self,
+            "PatientGuestIdentityPoolRoleAttachment",
+            identity_pool_id=identity_pool.ref,
+            roles={"unauthenticated": guest_role.role_arn},
+        )
+
+        CfnOutput(
+            self,
+            "PatientGuestIdentityPoolId",
+            value=identity_pool.ref,
+            description=(
+                "Cognito identity pool id the voice UI exchanges for guest "
+                "AWS credentials to presign the AgentCore WebSocket."
+            ),
+            export_name=f"{self.config.resource_name('patient-guest-identity')}-id",
+        )
+
+        return identity_pool, guest_role

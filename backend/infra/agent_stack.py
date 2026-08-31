@@ -27,8 +27,9 @@ This stack owns:
     (needs AWS credentials this environment does not have -- see
     `progress-tracker.md` -> Session Notes) and the guest-identity IAM
     role a browser will assume to invoke it (`architecture.md` -> Auth
-    and Access Model), which belongs with the Cognito identity pool in
-    `api_stack.py` / `frontend_stack.py`, not here.
+    and Access Model), which is now provisioned in `api_stack.py`'s
+    `_build_patient_guest_identity` via `Runtime.grant_invoke_runtime` on
+    the object this stack returns, not here.
 
 Vector storage is Amazon S3 Vectors (`architecture.md` -> Stack calls the
 Knowledge Base "S3-backed"), not OpenSearch Serverless: no cluster to
@@ -342,7 +343,7 @@ class AgentStack(Stack):
             # credentials, which is exactly what IAM auth verifies. The
             # guest role itself -- scoped to `grant_invoke_runtime` on this
             # resource and nothing else -- is provisioned alongside the
-            # identity pool in `api_stack.py`/`frontend_stack.py`, not here.
+            # identity pool in `api_stack.py`, not here.
             authorizer_configuration=agentcore.RuntimeAuthorizerConfiguration.using_iam(),
             # HTTP carries both the `/ping` health check and the `/ws`
             # WebSocket route `agentcore_app.py` defines -- the vendored

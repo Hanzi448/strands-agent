@@ -56,6 +56,7 @@ def main() -> None:
         description="ClinicPilot API: staff dashboard API, voice bridge, and Cognito.",
         appointments_table=data.appointments_table,
         escalations_table=data.escalations_table,
+        agent_runtime=agent.runtime,
         **common,
     )
 

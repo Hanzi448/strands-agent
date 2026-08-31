@@ -103,8 +103,15 @@ Update this file after every meaningful implementation change.
   unconfigured-backend error state, and the appointment/escalation cards
   were screenshotted in a headless browser (see Completed) — the
   farthest any frontend work in this repo has been verified without a
-  deployed backend to point it at. What is left of Next Up #2 is only
-  2b: the separate, patient-facing guest-identity Cognito pool.
+  deployed backend to point it at.
+- **The staff dashboard is now entirely finished, including 2b.**
+  `api_stack.py` gained the last piece: a separate, guest-only Cognito
+  identity pool for the patient-facing voice endpoint
+  (`_build_patient_guest_identity`), its role granted exactly
+  `runtime.grant_invoke_runtime` on the AgentCore Runtime `agent_stack.py`
+  builds and nothing else. `cdk synth` verifies it alone and as part of
+  all five stacks. Nothing left in `progress-tracker.md` -> Next Up is
+  dashboard work.
 
 ## Current Goal
 
@@ -119,7 +126,7 @@ Update this file after every meaningful implementation change.
   **actually deploying it** (a container build/push and real stack
   creation, both blocked in this environment -- Session Notes) and
   **pointing any interface at something real**
-  (credentials plus seeded clinics, #3). That second one is the
+  (credentials plus seeded clinics, #2). That second one is the
   bottleneck for three open questions at once — who greets the patient
   and what it costs in dead air, which voice each clinic answers in,
   and which text model the sub-agents reason with — plus one fact no
@@ -131,14 +138,11 @@ Update this file after every meaningful implementation change.
   model-facing surface over functions the background Lambda will call
   directly. The background job, including its CDK half, is now entirely
   done (see Completed) — its own remaining step is the same blocked
-  deploy as Next Up #1's. The staff dashboard's Python half (the new
-  clinic-wide appointment read, and `dashboard_api.py`'s four routes)
-  its CDK half (`api_stack.py`'s Cognito user pool, API Gateway, and
-  Lambda), and now its UI half (`frontend/src/dashboard/`, plus the
-  `frontend/` scaffolding it needed) are all done too (see Completed);
-  what is left of it is only the separate patient-facing guest identity
-  pool, split apart per `ai-workflow-rules.md` -> When to Split Work
-  (infra and frontend are each their own step, and neither is Python).
+  deploy as Next Up #1's. The staff dashboard — Python (the clinic-wide
+  appointment read, `dashboard_api.py`'s four routes), CDK (Cognito user
+  pool, API Gateway, Lambda), UI (`frontend/src/dashboard/`), and now the
+  patient-facing guest-identity Cognito pool too — is entirely done (see
+  Completed); nothing dashboard-shaped remains in Next Up.
   Next up: AgentCore deploy and the seed scripts (which now also creates
   the two staff Cognito accounts) — see Next Up.
 
@@ -1759,6 +1763,75 @@ Update this file after every meaningful implementation change.
   Next Up #3's seeding that every other not-yet-verified item in this
   tracker is blocked on (Session Notes).
 
+- **The patient-facing guest-identity Cognito identity pool**
+  (Next Up #2b, the last piece of the old "build the staff dashboard"
+  item). `api_stack.py` gained one new method,
+  `_build_patient_guest_identity`, and one new constructor parameter,
+  `agent_runtime`, wired from `app.py` as `agent.runtime` — the `Runtime`
+  object `agent_stack.py` already builds and returns.
+  **Assigned to `api_stack.py`, not `frontend_stack.py`** — the second
+  candidate `agent_stack.py`'s own docstring had left open. The deciding
+  fact: this identity pool's whole point is granting a role permission to
+  invoke the AgentCore Runtime, so it needs that runtime's ARN;
+  `api_stack.py` already carries a stack dependency on `agent_stack.py`
+  (`app.py`: `api.add_stack_dependency(agent)`, added when the dashboard
+  API was built, justified then as "voice bridge targets the agent
+  runtime"), while `frontend_stack.py` is still an empty skeleton with no
+  reason yet to depend on the agent stack at all.
+  **Guest identities only — no user pool attached.** `CfnIdentityPool`
+  is built with `allow_unauthenticated_identities=True` and no
+  `cognito_identity_providers`, since a patient never signs in
+  (`architecture.md` -> Auth and Access Model). This is a deliberate
+  departure from the vendored sample's own `auth-stack.ts`, which pairs
+  its identity pool with an authenticated Cognito user pool — read as
+  reference, not copied, because `project-overview.md` explicitly wants a
+  no-login patient flow. It is also a second, separate identity pool from
+  `StaffUserPool`/`DashboardClient` in this same stack: an anonymous
+  visitor's credential path must never cross with a staff login
+  (`architecture.md` -> Invariants #5), so this is its own
+  `CfnIdentityPool` and its own `CfnIdentityPoolRoleAttachment`
+  (`unauthenticated` role only — no `authenticated` entry), not a second
+  client added to the staff pool.
+  **The guest role's one grant is `Runtime.grant_invoke_runtime`**, the
+  `aws_bedrockagentcore.Runtime` L2 construct's own method — used instead
+  of hand-writing an `iam.PolicyStatement` with guessed action names
+  (the vendored TypeScript sample's own `auth-stack.ts` grants four
+  `bedrock-agentcore:Invoke*` actions against `resources: ['*']`, with a
+  comment that it "will be restricted... in production": exactly the
+  blanket grant `code-standards.md` -> AWS CDK forbids). `grant_invoke_runtime`
+  grants only `bedrock-agentcore:InvokeAgentRuntime`, scoped to this one
+  runtime's ARN — confirmed by reading the synthesized template, not
+  assumed: the resulting policy names the runtime ARN via
+  `Fn::ImportValue` from the agent stack's own `CfnOutput`, plus its
+  `/*` sub-resource. The broader `grant_invoke` (which also grants
+  `InvokeAgentRuntimeForUser`) was deliberately not used: that second
+  permission is for a per-user on-behalf-of header
+  (`X-Amzn-Bedrock-AgentCore-Runtime-User-Id`) this build never sets.
+  **No other grant was added.** `architecture.md` -> Invariants #5: a
+  role handed to every anonymous visitor must reach nothing but the
+  agent runtime — no DynamoDB, S3, or Bedrock-foundation-model policy
+  statement belongs on this role, unlike the runtime's own execution
+  role in `agent_stack.py`, which needs exactly those.
+  `agent_stack.py`'s and `api_stack.py`'s own docstrings, which both
+  named this as an open placement decision, are updated to point at
+  where it landed.
+  Verified: `cdk synth` exits 0 for the `Api` stack alone and for all
+  five stacks together (`cdk list` still shows all five, in the same
+  dependency order). Read the synthesized `ClinicPilot-Dev-Api` template
+  directly to confirm the shape rather than assuming it from the CDK
+  call: `PatientGuestIdentityPool` (`AllowUnauthenticatedIdentities:
+  true`, no providers), `PatientGuestRole`'s policy naming exactly the
+  imported runtime ARN and its `/*` child, and
+  `PatientGuestIdentityPoolRoleAttachment` carrying only the
+  `unauthenticated` key. No `backend/tools/`, `backend/agents/`, or
+  `backend/lambda/` file was touched, so the existing pytest suite is
+  unaffected by this unit (infra-only, per `ai-workflow-rules.md` ->
+  When to Split Work).
+  **Not verified, and cannot be yet**: an actual browser exchanging a
+  guest identity for AWS credentials and presigning a real WebSocket
+  connection — that needs `frontend/src/voice/` (not yet built) and the
+  same blocked `cdk deploy` as Next Up #1.
+
 ## In Progress
 
 - None.
@@ -1775,7 +1848,7 @@ Dockerfile half, `agent_stack.py`'s AgentCore Runtime, are both in
 Completed below. What remains of #1 is now purely the deploy action
 itself — a `cdk deploy` needing Docker and AWS credentials this
 environment has neither of — and the real call that follows it, which is
-why **#3 (seed) unblocks more than its position suggests**: it is what
+why **#2 (seed) unblocks more than its position suggests**: it is what
 turns either interface, and soon the deployed one, from a program that
 runs into a call someone can listen to, and it is where the greeting,
 voice and text-model questions get answered.
@@ -1791,42 +1864,40 @@ Scheduling, FAQ and Escalation — is therefore finished; everything left
 in this list is infrastructure, background automation, dashboard, or
 content, not agent code.
 
+The old #2 ("Build the staff dashboard") has now been completed in full,
+across four units split by `ai-workflow-rules.md` -> When to Split Work:
+its Python half (`tools/appointments.list_appointments_for_clinic` plus
+`lambda/dashboard_api.py`'s four routes over it and the three existing
+escalation reads/write), its CDK half (`api_stack.py`'s staff Cognito
+user pool, REST API Gateway, and Lambda), its UI half
+(`frontend/src/dashboard/`, plus the Vite/React/Tailwind/shadcn
+scaffolding under `frontend/` that was its first thing to need), and now
+2b, its last remaining piece: the patient-facing guest-identity Cognito
+**identity pool**, also landed in `api_stack.py`
+(`_build_patient_guest_identity`) rather than `frontend_stack.py` (the
+other candidate Next Up #1's own docstring had named) — it needs the
+AgentCore Runtime's ARN, which `api_stack.py` already takes a stack
+dependency on `agent_stack.py` for, and `frontend_stack.py` is still an
+empty skeleton. The guest role gets exactly one grant,
+`runtime.grant_invoke_runtime`, and nothing else — no DynamoDB, S3, or
+Bedrock-model access, per `architecture.md` -> Invariants #5. All four
+are in Completed below; the numbered list is renumbered accordingly.
+
 1. Deploy `agentcore_app.py` to the AgentCore Runtime `agent_stack.py`
    now defines, then verify one voice session end-to-end. Both the
    Python side and the CDK side are done (see Completed) — this item is
    now purely `cdk deploy` (needs Docker, to build and push
    `backend/Dockerfile`'s image, and AWS credentials, to create the
    stack) plus pointing a real browser or `websocat`-style client at the
-   deployed `/ws` with a seeded clinic behind it, and provisioning the
-   guest-identity Cognito role a browser needs to invoke it
-   (`architecture.md` -> Auth and Access Model — belongs beside Cognito
-   in `api_stack.py`/`frontend_stack.py`, not in `agent_stack.py`).
+   deployed `/ws` with a seeded clinic behind it. The guest-identity
+   Cognito role a browser needs to invoke it now exists too (see
+   Completed) — this item no longer needs any new infrastructure, only
+   the deploy itself.
    **Blocked in this environment specifically**: see Session Notes — no
    Docker and no AWS credentials are usable here for anything beyond
    local, offline work, so this item needs a session (or a person) that
    actually has both.
-2. Build the staff dashboard. Its Python half is done (see Completed):
-   `tools/appointments.list_appointments_for_clinic` plus
-   `lambda/dashboard_api.py`'s four routes over it and the three
-   existing escalation reads/write. Its CDK half is done too (see
-   Completed): `api_stack.py` provisions the staff Cognito user pool
-   with its `custom:clinic_id` custom attribute, the REST API Gateway's
-   four routes behind a Cognito authorizer, and the Lambda plus its
-   scoped IAM role, all verified via `cdk synth`. Its UI half (2a) is
-   now done too (see Completed): `frontend/src/dashboard/` — Cognito
-   login, appointments view with an inline agent-activity log,
-   escalation queue with a detail modal and "Mark Resolved" — plus the
-   Vite/React/Tailwind/shadcn scaffolding under `frontend/` that this
-   was the first thing to need. `npm run build` passes and the UI was
-   screenshotted end to end (offline — no deployed API yet). What
-   remains is:
-   b. The guest-identity Cognito **identity pool** for the patient-facing
-      voice endpoint (`architecture.md` -> Auth and Access Model) is a
-      separate, still-open piece — unrelated to the staff user pool just
-      built, and not yet assigned a stack (candidates are `api_stack.py`
-      or `frontend_stack.py`, per the note on Next Up #1 above). Not
-      started.
-3. Seed the two demo clinics (dental, cosmetic) with config,
+2. Seed the two demo clinics (dental, cosmetic) with config,
    sample appointments, the two staff Cognito accounts (`api_stack.py`'s
    user pool now exists to hold them — `admin-create-user` /
    `admin-set-user-password`, each with its `custom:clinic_id` set), and
@@ -1838,7 +1909,7 @@ content, not agent code.
    identity needs to exist for, so `CLINICPILOT_REMINDER_SENDER_EMAIL`
    can finally be set on the background scan Lambda's environment
    (`automation_stack.py`, Next Up's old #2) — see Session Notes.
-4. Architecture diagram, README, demo video, submission assets.
+3. Architecture diagram, README, demo video, submission assets.
 
 ## Open Questions
 
