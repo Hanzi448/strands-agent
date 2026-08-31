@@ -23,6 +23,9 @@ Modules:
     escalations: what the agent could not safely do itself -- raising an
         item for staff, reading the open queue, and marking one handled.
         The one module here whose items exist to be read by a person.
+    faq: `query_faq` -- passages from the clinic's own Bedrock Knowledge
+        Base, for a sub-agent's model to phrase. The only module here that
+        reads from something other than DynamoDB.
 
 Nothing here imports Strands or AgentCore. The `@tool`-decorated agent
 surface lives in `backend/agents/`; this layer stays callable from a

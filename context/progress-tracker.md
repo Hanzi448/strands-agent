@@ -11,11 +11,12 @@ Update this file after every meaningful implementation change.
   Knowledge Base per demo clinic over Amazon S3 Vectors (the other three
   stacks — API, automation, frontend — are still empty). `backend/tools/`
   has its foundation, the complete availability read surface, the
-  complete scheduling write surface, and the complete escalation
-  surface. All four tables are written by that layer. The one tool
-  still missing is the FAQ query: the Knowledge Base it reads now
-  exists (as CDK, unsynthesised for real), so writing it is Next Up #2,
-  no longer blocked on infra that didn't exist.
+  complete scheduling write surface, the complete escalation surface,
+  and now the FAQ read (`query_faq`, over the Knowledge Base
+  infrastructure that landed just before it). All four tables are
+  written by that layer, and `backend/tools/` itself is now complete —
+  five modules, no tool left to write. What remains of Next Up #2 is the
+  agent-layer half: `faq_agent.py` and its wiring into the Orchestrator.
 - `backend/agents/` now holds its **foundation** (`session.py`,
   `results.py`), **both patient-facing sub-agents** — Scheduling
   (`scheduling_agent.py`) and Escalation (`escalation_agent.py`) — the
@@ -64,13 +65,14 @@ Update this file after every meaningful implementation change.
   sub-agents reason with — all of which are answered by listening to one
   call rather than by argument. The FAQ sub-agent waited for the
   Knowledge Base to exist as infrastructure; that landed as its own
-  unit (Completed, below), so the FAQ tool and sub-agent are next.
+  unit, and `query_faq` (the tool half of Next Up #2) has now landed
+  over it too (Completed, below). What is left of Next Up #2 is
+  `faq_agent.py` and wiring it into the Orchestrator.
   Nothing in `backend/tools/` may move into an agent definition
   (`architecture.md` -> Invariants #3): the agents are a thin
   model-facing surface over functions the background Lambda will call
-  directly. After the agents: Nova Sonic voice, AgentCore deploy, the
-  FAQ tool and sub-agent, the background Lambda, the dashboard, and the
-  seed scripts.
+  directly. After the FAQ sub-agent: AgentCore deploy, the background
+  Lambda, the dashboard, and the seed scripts.
 
 ## Completed
 
@@ -1024,6 +1026,63 @@ Update this file after every meaningful implementation change.
   deploy and real documents, which is what the FAQ tool (Next Up #2)
   and a seeded clinic (#5) will exercise.
 
+- **`query_faq` in `backend/tools/faq.py`** (Next Up #2, tool half). The
+  fifth tool module, the last one Next Up #2 needs before the sub-agent,
+  and the only module in `backend/tools/` that reads something other than
+  DynamoDB. One module, a 19-test suite.
+  **Split from the old bundled #2** (tool, sub-agent, and orchestrator
+  wiring together): the same reasoning `ai-workflow-rules.md` -> When to
+  Split Work already applied to `scheduling_agent.py` and
+  `escalation_agent.py` — a tool is independently verifiable the moment
+  the resource under it exists, a sub-agent wrapping it and the
+  Orchestrator prompt edit that routes to it are one wiring change and
+  land together next.
+  **Resolved the one open question blocking this unit**: `retrieve`, not
+  `retrieve_and_generate` — see Open Questions for the reasoning. What
+  that decided in code: `query_faq` returns `{"question", "passages":
+  [{"text": str}, ...], "found": bool}`, never a composed sentence, so
+  phrasing the answer stays the sub-agent's model's job, exactly as
+  `check_availability` returns slots rather than a sentence about them.
+  **No match is a normal answer, not a failure.** An empty
+  `retrievalResults` comes back as `found: False` with an empty
+  `passages` list, never `NotFoundError` — the same choice
+  `check_availability` already made for a fully-booked day, because "I
+  don't know" is an answer the sub-agent's model has to hear and act on
+  (say so plainly, or escalate), not an exception unwound past it.
+  **The Knowledge Base id is resolved per clinic, not read from
+  `Clinics`.** `agent_stack.py`'s own docstring called this out when it
+  landed: each clinic's Knowledge Base id is read from one environment
+  variable, `knowledge_base_id_env_var(clinic_id)` (e.g.
+  `CLINICPILOT_KB_ID_CLINIC_DENTAL`) — the same role `dynamo.table_name`
+  plays for the four tables, except derived from the `clinic_id` itself
+  rather than being one of a fixed handful, since a Knowledge Base (unlike
+  a table) is not shared across tenants. Unlike a table name, there is no
+  naming scheme to derive a real id from before `agent_stack.py` deploys
+  one, so an unset variable is a `ConfigurationError`, not a fallback.
+  **`max_results` is a bounded model choice, not a free integer** — the
+  same `require_bounded_int` shape `check_availability`'s `days` uses,
+  capped at `MAX_MAX_RESULTS` (10) so a model that guessed a large number
+  cannot turn one FAQ question into an oversized retrieval call.
+  Verified: `pytest` from `backend/` — **633 passed** (614 before, 19
+  new), the pre-existing 614 unchanged; nothing outside
+  `backend/tools/faq.py`, its test, and `tools/__init__.py`'s module list
+  was touched. Offline throughout: a `FakeBedrockAgentRuntimeClient`
+  returns Bedrock's own `retrieve` response shape (`retrievalResults[].
+  content.text`), so the module is proved to read the real field path
+  rather than a simplified stand-in for it. Covers: each clinic resolving
+  its own configured id (never another clinic's), an unset or blank
+  variable failing as `ConfigurationError` naming the variable, passages
+  returned closest-match-first, a `retrievalResults` entry with no
+  readable text dropped rather than surfaced as an empty passage,
+  `max_results` forwarded to `vectorSearchConfiguration.numberOfResults`
+  and defaulting/bounding correctly, and `clinic_id` validated before
+  `question` when both are bad.
+  **Not verified, and cannot be yet**: against a real Knowledge Base.
+  Every clinic's id is env-var-supplied and every response in the suite
+  is synthetic; whether a real `retrieve` call against the seeded FAQ
+  documents returns something a patient would recognise as an answer
+  needs a real deploy (#1) and real documents (#5).
+
 ## In Progress
 
 - None.
@@ -1047,8 +1106,12 @@ The old #2 ("KB bucket plus the Bedrock Knowledge Base") has had the
 same infra/logic split applied to it as #1 did
 (`ai-workflow-rules.md` -> When to Split Work): the infrastructure half
 — the KB source bucket and one Bedrock Knowledge Base per demo clinic —
-is in Completed below. What remains is the FAQ tool and sub-agent, now
-renumbered #2.
+is in Completed below. `backend/tools/faq.py` (the tool half) has now
+landed too, on the same reasoning: a tool over an already-provisioned
+resource is independently verifiable, while the sub-agent that wraps it
+and the Orchestrator prompt edit that routes to it are not splittable
+from each other (they are one wiring change). What remains of #2 is that
+second half.
 
 1. Provision AgentCore Runtime and deploy `agentcore_app.py` to it,
    then verify one voice session end-to-end. The Python side is done
@@ -1062,24 +1125,21 @@ renumbered #2.
    environment specifically**: see Session Notes — no AWS credentials
    are usable here for anything beyond local, offline work, so this item
    needs a session (or a person) that actually has them.
-2. Write `backend/tools/faq.py` (a `query_faq` function calling Bedrock
-   Agent Runtime against the clinic's own Knowledge Base id — see Open
-   Questions for `retrieve` vs `retrieve_and_generate`, still
-   undecided) and `faq_agent.py` (the third sub-agent, same four-part
-   shape as `scheduling_agent.py`/`escalation_agent.py`), then wire
-   `faq_agent_tool` into `orchestrator_tools` and move price/prep/policy
-   routing out of the escalation paragraph of
+2. Write `faq_agent.py` (the third sub-agent, same four-part shape as
+   `scheduling_agent.py`/`escalation_agent.py`, over the now-complete
+   `query_faq`), then wire `faq_agent_tool` into `orchestrator_tools` and
+   move price/prep/policy routing out of the escalation paragraph of
    `ORCHESTRATOR_SYSTEM_PROMPT`. Testable offline exactly as the other
-   tools are: a fake `bedrock-agent-runtime` client stands in for a real
-   Knowledge Base, the same way fake tables stand in for DynamoDB — no
-   dependency on a deployed KB or credentials. Each clinic's Knowledge
-   Base id is a real value only after `agent_stack.py` deploys
-   (blocked, see #1's Session Note); until then the tool resolves it
-   from an environment variable exactly as `dynamo.py` resolves table
-   names, and tests supply one directly. Note what the gap costs today:
-   the Orchestrator's only route for a price or preparation question is
-   `escalation_assistant`, so every FAQ becomes a card in the staff
-   queue. Correct, and lossy.
+   sub-agents were: a `ScriptedModel` stands in for the sub-agent's model
+   and `query_faq`'s own suite already proves the retrieval call against
+   a fake `bedrock-agent-runtime` client, so nothing here needs a
+   deployed KB or credentials. Each clinic's Knowledge Base id is a real
+   value only after `agent_stack.py` deploys (blocked, see #1's Session
+   Note); until then `query_faq` resolves it from an environment variable
+   (`knowledge_base_id_env_var`), and tests supply one directly. Note
+   what the gap costs today: the Orchestrator's only route for a price or
+   preparation question is `escalation_assistant`, so every FAQ becomes a
+   card in the staff queue. Correct, and lossy.
 3. Build the background Lambda + EventBridge schedule, reusing
    `backend/tools/` functions. Its no-show/reschedule heuristic is not
    specified anywhere yet — per `ai-workflow-rules.md` -> When to Split
@@ -1254,22 +1314,22 @@ renumbered #2.
   invented: today both would sound identical. Worth one line either way
   before the demo is recorded.
 
-- **Does the FAQ tool call Bedrock's `retrieve` or
-  `retrieve_and_generate`?** Neither `architecture.md` nor
-  `project-overview.md` says which. `retrieve` returns raw passages and
-  leaves *composing* the spoken answer to the sub-agent's own model —
-  consistent with every other tool in `backend/tools/`, which return
-  facts for an agent to phrase, never a phrased answer themselves
-  (`code-standards.md` -> General, "business logic ... never inline
-  inside an agent definition" cuts the other way for a tool that already
-  contains an LLM call). `retrieve_and_generate` does the composing
-  inside the tool, in one Bedrock call, with no sub-agent judgement
-  over the wording — cheaper in round trips, but a second, hidden model
-  choice (which one generates?) and a second place an answer could
-  drift from `ORCHESTRATOR_SYSTEM_PROMPT`'s honesty rules. Leaning
-  `retrieve`, for consistency with the rest of the tool layer, but not
-  decided here — settle before writing `backend/tools/faq.py`
-  (Next Up #2).
+- ~~**Does the FAQ tool call Bedrock's `retrieve` or
+  `retrieve_and_generate`?**~~ **Resolved** — `retrieve`, settled while
+  writing `backend/tools/faq.py` (Next Up #2, tool half) rather than
+  deferred further, since the item explicitly named this as blocking.
+  `retrieve` returns raw passages and leaves *composing* the spoken
+  answer to the sub-agent's own model — consistent with every other tool
+  in `backend/tools/`, which return facts for an agent to phrase, never a
+  phrased answer themselves (`code-standards.md` -> General, "business
+  logic ... never inline inside an agent definition" cuts the other way
+  for a tool that already contains an LLM call). `retrieve_and_generate`
+  would have done the composing inside the tool, in one Bedrock call,
+  with no sub-agent judgement over the wording — cheaper in round trips,
+  but a second, hidden model choice (which one generates?) and a second
+  place an answer could drift from `ORCHESTRATOR_SYSTEM_PROMPT`'s honesty
+  rules. See Completed for what this decided in code: `query_faq` returns
+  `{"passages": [...], "found": bool}`, never a composed sentence.
 
 - **Can a patient ask what they already have booked?**
   `project-overview.md` lists check availability, book, reschedule,
