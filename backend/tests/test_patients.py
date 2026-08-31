@@ -199,6 +199,31 @@ def test_a_spoken_number_finds_a_seeded_one(spoken, table) -> None:
     assert created is False
 
 
+def test_country_code_finds_a_patient_seeded_in_the_other_form(table) -> None:
+    """`country_code` reconciles national and international spellings.
+
+    Dana's record is seeded in the stored (international) form; a caller
+    who gives the national form is still recognised once the clinic's own
+    `country_code` is passed through -- the reconciliation
+    `validation.normalise_phone` resolves and this module threads down.
+    """
+    table(stored_patient("Dana Okafor"))
+    patient, created = patients.lookup_or_create_patient(
+        CLINIC, "555 123 4567", "Dana Okafor", country_code="1"
+    )
+    assert created is False
+    assert patient["phone"] == PHONE
+
+
+def test_without_country_code_the_national_form_is_a_new_patient(table) -> None:
+    """The reconciliation is opt-in: omitting `country_code` keeps the two
+    spellings as two different keys, exactly as before this was resolved.
+    """
+    table(stored_patient("Dana Okafor"))
+    _, created = patients.lookup_or_create_patient(CLINIC, "555 123 4567", "Dana Okafor")
+    assert created is True
+
+
 def test_matching_is_deterministic_across_identical_calls(table) -> None:
     """Items sharing a sort key come back in no defined order; ours must not."""
     fake = table(

@@ -253,7 +253,9 @@ def require_enum[E: StrEnum](value: str | E | None, enum_cls: type[E], field: st
     raise ValidationError(f"{field} must be one of: {allowed}; got {value!r}.")
 
 
-def normalise_phone(value: str | None, field: str = "phone") -> str:
+def normalise_phone(
+    value: str | None, field: str = "phone", country_code: str | None = None
+) -> str:
     """Validate a phone number and reduce it to one canonical form: its digits.
 
     The `by-phone` index does an equality match on the stored string, so
@@ -270,11 +272,29 @@ def normalise_phone(value: str | None, field: str = "phone") -> str:
     lookup key and a string staff may read -- so the marker costs a
     correctness bug and buys nothing.
 
-    What this does **not** do is reconcile a national number with its
-    international form: ``"555 123 4567"`` and ``"+1 555 123 4567"`` stay
-    distinct, because turning the first into the second requires assuming
-    a country, which no context file specifies. See `progress-tracker.md`
-    -> Open Questions.
+    With `country_code` given, this also reconciles a national number with
+    its international form: a value carrying no explicit international
+    marker (no leading ``+`` or ``00``) is assumed to be dialled from
+    inside that country and has the code prepended, so ``"555 123 4567"``
+    and ``"+1 555 123 4567"`` converge on the same key when `country_code`
+    is ``"1"``. A value that already carries ``+``/``00`` is left as the
+    international number it already is -- only the marker is stripped,
+    never the digits after it. Resolved in `progress-tracker.md` -> Open
+    Questions ("Does a spoken phone number need a default country code?"):
+    one country code per clinic (`schema.ClinicAttrs.COUNTRY_CODE`), over a
+    suffix match (collision-prone) or leaving it unresolved.
+    `country_code` is `None` by default, which is the old behaviour
+    unchanged: national and international forms of one number stay two
+    different keys, because there is then no country to assume.
+
+    Prepending is skipped when `digits` already starts with `country_code`
+    -- both so this function is idempotent when called again on its own
+    output (several call sites re-normalise an already-normalised phone,
+    e.g. `patients.find_patient` -> `find_patients_by_phone`), and as the
+    accepted cost of not asking the caller which case it is: a *national*
+    number that happens to start with the same digits as the country code
+    (e.g. a UK number starting "44...") is left unprefixed rather than
+    getting the code doubled on.
 
     This is storage normalisation, not validation of real-world
     reachability -- no country/carrier check is performed.
@@ -282,18 +302,36 @@ def normalise_phone(value: str | None, field: str = "phone") -> str:
     Args:
         value: The candidate number, from speech or from a seed script.
         field: Attribute name, used in the error message.
+        country_code: The calling clinic's own country code, digits only,
+            no leading ``+`` (e.g. ``"44"``). Omit to leave national and
+            international forms of one number unreconciled.
 
     Returns:
         The number's digits, in order, with nothing else.
 
     Raises:
         ValidationError: If it is missing, or has an implausible number of
-            digits (see `MIN_PHONE_DIGITS`/`MAX_PHONE_DIGITS`).
+            digits (see `MIN_PHONE_DIGITS`/`MAX_PHONE_DIGITS`) once
+            reconciled.
     """
     if not isinstance(value, str) or not value.strip():
         raise ValidationError(f"{field} is required and must be a non-empty string.")
     raw = value.strip()
+    has_international_marker = raw.startswith("+") or raw.startswith("00")
     digits = "".join(character for character in raw if character.isdigit())
+    if has_international_marker and raw.startswith("00"):
+        # "00" is the dialled substitute for "+" -- drop it the same way
+        # "+" itself is dropped, so both spellings of one international
+        # number collapse to the same digits.
+        digits = digits[2:]
+    if country_code and not has_international_marker:
+        code_digits = "".join(c for c in country_code if c.isdigit())
+        # Idempotent: this function is called again on its own output
+        # (`find_patient` -> `find_patients_by_phone`, both re-normalising
+        # an already-normalised value with the same `country_code`), so an
+        # already-prepended code must not be prepended a second time.
+        if not digits.startswith(code_digits):
+            digits = code_digits + digits
     if not MIN_PHONE_DIGITS <= len(digits) <= MAX_PHONE_DIGITS:
         raise ValidationError(
             f"{field} must contain between {MIN_PHONE_DIGITS} and "

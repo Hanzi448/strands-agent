@@ -108,15 +108,54 @@ def test_normalise_phone_converges_on_one_stored_form(spoken, expected) -> None:
     assert normalise_phone(spoken) == expected
 
 
-def test_normalise_phone_does_not_invent_a_country_code() -> None:
-    """The limit of what this can converge, asserted rather than assumed.
+def test_normalise_phone_without_country_code_does_not_invent_one() -> None:
+    """The old behaviour, unchanged when no `country_code` is given.
 
-    A national number cannot be turned into its international form without
-    assuming a country, which no context file specifies -- so these stay
-    two keys, and it is `progress-tracker.md` -> Open Questions that has to
-    resolve it, not a default picked here.
+    Reconciling a national number with its international form needs a
+    country to assume; with none given these stay two keys, exactly as
+    before `progress-tracker.md` -> Open Questions ("Does a spoken phone
+    number need a default country code?") was resolved.
     """
     assert normalise_phone("555 123 4567") != normalise_phone("+1 555 123 4567")
+
+
+@pytest.mark.parametrize(
+    ("spoken", "expected"),
+    [
+        ("555 123 4567", "15551234567"),
+        ("+1 555 123 4567", "15551234567"),
+        ("1-555-123-4567", "15551234567"),
+        ("001 555 123 4567", "15551234567"),
+        ("00 1 555 123 4567", "15551234567"),
+    ],
+)
+def test_normalise_phone_with_country_code_converges_national_and_international(
+    spoken, expected
+) -> None:
+    """The resolved behaviour: a clinic's own `country_code` reconciles them.
+
+    A number with no explicit ``+``/``00`` marker is assumed to be dialled
+    from inside that country and gets the code prepended; a number that
+    already carries one is left as the international number it is.
+    """
+    assert normalise_phone(spoken, country_code="1") == expected
+
+
+def test_normalise_phone_with_country_code_is_idempotent() -> None:
+    """Re-normalising an already-normalised number must not double the code.
+
+    `patients.find_patient` re-normalises a value `find_patients_by_phone`
+    is about to normalise again, both with the same `country_code` -- if
+    prepending were not guarded, the second pass would double it on.
+    """
+    once = normalise_phone("555 123 4567", country_code="1")
+    twice = normalise_phone(once, country_code="1")
+    assert once == twice == "15551234567"
+
+
+def test_normalise_phone_with_country_code_leaves_an_already_international_number() -> None:
+    """A `+`/`00` marker means "trust this digit string", code or no code."""
+    assert normalise_phone("+44 20 7946 0958", country_code="1") == "442079460958"
 
 
 @pytest.mark.parametrize("bad", ["", "12345", "1" * 16, "no digits here", None])

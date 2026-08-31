@@ -124,12 +124,19 @@ def find_upcoming_appointments(
     Raises:
         ValidationError: If `clinic_id`, `patient_phone`, or `patient_name`
             is missing or malformed.
+        NotFoundError: If no clinic exists with that `clinic_id`. The
+            clinic item is read here (as in `list_appointments_for_clinic`)
+            for its `country_code`, so the same phone reconciliation
+            `book_appointment` applies also finds a caller who booked with
+            one form of their number and is asking about it with another.
     """
     clinic_id = require_clinic_id(clinic_id)
-    phone = normalise_phone(patient_phone, "patient_phone")
+    clinic = get_clinic(clinic_id)
+    country_code = clinic.get(ClinicAttrs.COUNTRY_CODE)
+    phone = normalise_phone(patient_phone, "patient_phone", country_code)
     name = require_text(patient_name, "patient_name", max_length=MAX_IDENTIFIER_LENGTH)
 
-    patient = find_patient(clinic_id, phone, name)
+    patient = find_patient(clinic_id, phone, name, country_code=country_code)
     if patient is None:
         return []
     return upcoming_appointments_for_patient(
@@ -607,7 +614,8 @@ def _resolve_appointment(
             appointment id exists.
         ConflictError: If several are upcoming and none was named.
     """
-    phone = normalise_phone(patient_phone, "patient_phone")
+    country_code = clinic.get(ClinicAttrs.COUNTRY_CODE)
+    phone = normalise_phone(patient_phone, "patient_phone", country_code)
     name = require_text(patient_name, "patient_name", max_length=MAX_IDENTIFIER_LENGTH)
     wanted = (
         None
@@ -615,7 +623,7 @@ def _resolve_appointment(
         else require_identifier(appointment_id, AppointmentAttrs.APPOINTMENT_ID)
     )
 
-    patient = find_patient(clinic_id, phone, name)
+    patient = find_patient(clinic_id, phone, name, country_code=country_code)
     upcoming = (
         []
         if patient is None

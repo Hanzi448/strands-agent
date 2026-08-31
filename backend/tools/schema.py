@@ -161,6 +161,10 @@ class ClinicAttrs:
     requires that nothing outside a clinic's own item is consulted to
     decide whether a time is bookable. Their nested value shapes are
     specified there -- see the module docstring.
+
+    `COUNTRY_CODE` is a separate concern -- phone-number reconciliation,
+    not availability -- and is optional: a clinic with none set leaves
+    `validation.normalise_phone` at its old behaviour (see there).
     """
 
     CLINIC_ID: Final[str] = CLINIC_ID
@@ -173,6 +177,9 @@ class ClinicAttrs:
     CLOSURES: Final[str] = "closures"
     SERVICES: Final[str] = "services"
     SLOT_MINUTES: Final[str] = "slot_minutes"
+    # Digits only, no leading "+" (e.g. "44", "1") -- see
+    # `validation.normalise_phone`. Optional; absent means "don't reconcile".
+    COUNTRY_CODE: Final[str] = "country_code"
     CONTACT_EMAIL: Final[str] = "contact_email"
     CONTACT_PHONE: Final[str] = "contact_phone"
     CREATED_AT: Final[str] = CREATED_AT

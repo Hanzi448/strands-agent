@@ -50,7 +50,9 @@ from .validation import (
 )
 
 
-def find_patients_by_phone(clinic_id: str, phone: str) -> list[dict[str, Any]]:
+def find_patients_by_phone(
+    clinic_id: str, phone: str, *, country_code: str | None = None
+) -> list[dict[str, Any]]:
     """Every patient at one clinic registered against one phone number.
 
     A list rather than a single item because a phone number is not a key:
@@ -63,6 +65,10 @@ def find_patients_by_phone(clinic_id: str, phone: str) -> list[dict[str, Any]]:
             partition key, so the query cannot reach another tenant
             (`architecture.md` -> Invariants #1).
         phone: The caller's number, in any spoken or written form.
+        country_code: The clinic's own country code, from
+            `schema.ClinicAttrs.COUNTRY_CODE`, if the caller already holds
+            the clinic item. Passed straight to `validation.normalise_phone`
+            -- see there for what it does and why it is optional.
 
     Returns:
         Matching `Patients` items, ordered oldest-registered first so the
@@ -74,7 +80,7 @@ def find_patients_by_phone(clinic_id: str, phone: str) -> list[dict[str, Any]]:
             or has an implausible number of digits.
     """
     clinic_id = require_clinic_id(clinic_id)
-    normalised = normalise_phone(phone, "phone")
+    normalised = normalise_phone(phone, "phone", country_code)
 
     # Lazy, mirroring `dynamo._dynamodb_resource`: importing this module
     # must not require the AWS SDK.
@@ -107,7 +113,12 @@ def find_patients_by_phone(clinic_id: str, phone: str) -> list[dict[str, Any]]:
 
 
 def lookup_or_create_patient(
-    clinic_id: str, phone: str, name: str, email: str | None = None
+    clinic_id: str,
+    phone: str,
+    name: str,
+    email: str | None = None,
+    *,
+    country_code: str | None = None,
 ) -> tuple[dict[str, Any], bool]:
     """Resolve a caller to a `Patients` item, registering them if new.
 
@@ -126,6 +137,9 @@ def lookup_or_create_patient(
             "555 123 4567" finds a record seeded as "+15551234567".
         name: The caller's name, as spoken.
         email: Optional contact address for reminders.
+        country_code: The clinic's own country code, from
+            `schema.ClinicAttrs.COUNTRY_CODE`, if the caller already holds
+            the clinic item. Passed straight to `validation.normalise_phone`.
 
     Returns:
         `(patient_item, created)` -- the stored item, and whether this call
@@ -137,11 +151,13 @@ def lookup_or_create_patient(
             malformed, or if `email` is given and is not an address.
     """
     clinic_id = require_clinic_id(clinic_id)
-    normalised_phone = normalise_phone(phone, "phone")
+    normalised_phone = normalise_phone(phone, "phone", country_code)
     cleaned_name = require_text(name, "name", max_length=MAX_IDENTIFIER_LENGTH)
     cleaned_email = None if email is None else normalise_email(email, "email")
 
-    existing = find_patient(clinic_id, normalised_phone, cleaned_name)
+    existing = find_patient(
+        clinic_id, normalised_phone, cleaned_name, country_code=country_code
+    )
     if existing is not None:
         if cleaned_email is not None:
             existing = _fill_missing_email(existing, cleaned_email)
@@ -152,7 +168,9 @@ def lookup_or_create_patient(
     ), True
 
 
-def find_patient(clinic_id: str, phone: str, name: str) -> dict[str, Any] | None:
+def find_patient(
+    clinic_id: str, phone: str, name: str, *, country_code: str | None = None
+) -> dict[str, Any] | None:
     """The one patient a phone number and a name together identify, if any.
 
     This module's identity rule, and the *only* place it is applied --
@@ -171,6 +189,9 @@ def find_patient(clinic_id: str, phone: str, name: str) -> dict[str, Any] | None
         phone: The caller's number, in any spoken form.
         name: The caller's name, as spoken. Compared through `_name_key`,
             so case and spacing do not matter.
+        country_code: The clinic's own country code, from
+            `schema.ClinicAttrs.COUNTRY_CODE`, if the caller already holds
+            the clinic item. Passed straight to `validation.normalise_phone`.
 
     Returns:
         The matching `Patients` item, or `None` if this clinic has no
@@ -183,9 +204,11 @@ def find_patient(clinic_id: str, phone: str, name: str) -> dict[str, Any] | None
             malformed.
     """
     clinic_id = require_clinic_id(clinic_id)
-    normalised_phone = normalise_phone(phone, "phone")
+    normalised_phone = normalise_phone(phone, "phone", country_code)
     wanted = _name_key(require_text(name, "name", max_length=MAX_IDENTIFIER_LENGTH))
-    for candidate in find_patients_by_phone(clinic_id, normalised_phone):
+    for candidate in find_patients_by_phone(
+        clinic_id, normalised_phone, country_code=country_code
+    ):
         stored = candidate.get(PatientAttrs.NAME)
         if isinstance(stored, str) and _name_key(stored) == wanted:
             return candidate

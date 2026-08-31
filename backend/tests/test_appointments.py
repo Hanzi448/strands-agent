@@ -950,6 +950,25 @@ def test_find_upcoming_appointments_is_empty_for_an_unknown_caller(tables) -> No
     assert appointments.find_upcoming_appointments(DENTAL_ID, PHONE, "Someone Else") == []
 
 
+def test_find_upcoming_appointments_reconciles_via_the_clinics_country_code(
+    tables,
+) -> None:
+    """A caller who speaks their number nationally still finds their record.
+
+    `PHONE` (the seeded, stored form) is the international spelling; a
+    caller who gives the national one is only recognised because this
+    function now reads the clinic for `country_code` before normalising --
+    without it, this would come back empty, exactly as
+    `test_normalise_phone_without_country_code_does_not_invent_one` pins.
+    """
+    tables(
+        clinics=FakeClinicsTable({**dental_clinic(), "country_code": "1"}),
+        appointment_items=one_checkup(),
+    )
+    found = appointments.find_upcoming_appointments(DENTAL_ID, "555 123 4567", NAME)
+    assert [item["appointment_id"] for item in found] == ["apt_one"]
+
+
 def test_find_upcoming_appointments_pages(tables) -> None:
     """The by-patient query is paginated like every other one in this layer."""
     _, store, _ = tables(appointment_items=one_checkup())

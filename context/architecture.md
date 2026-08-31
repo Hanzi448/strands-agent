@@ -155,9 +155,29 @@ EventBridge, Bedrock, and SES are all pay-per-use managed services.
       `+` included in what is stripped. The index does an equality match,
       so every way of writing one number must collapse to one key;
       preserving the `+` conditionally made `+1 555…` and `1-555…` two
-      keys for one number. This does *not* reconcile a national number
-      with its international form — see `progress-tracker.md` → Open
-      Questions.
+      keys for one number.
+    - **Reconciling a national number with its international form**
+      (`"555 123 4567"` vs `"+1 555 123 4567"`) needs a country to assume,
+      which is `country_code` on `Clinics` — digits only, no leading `+`
+      (e.g. `"44"`), alongside `timezone`. Optional: a clinic with none set
+      leaves `normalise_phone` at its old, unreconciled behaviour. When
+      set, a number with no explicit `+`/`00` marker is assumed dialled
+      from inside that country and has the code prepended before storage;
+      a number that already carries one is left as the international
+      number it is — only the marker is stripped. Resolved with the user
+      rather than defaulted (`ai-workflow-rules.md` → Handling Missing
+      Requirements); rejected alternatives were a digit-suffix match
+      (collision-prone) and leaving it unresolved. Every call site that can
+      cheaply hold the clinic item threads its `country_code` through
+      (`booking.book_appointment`, `appointments.find_upcoming_appointments`
+      and `appointments._resolve_appointment`, the latter two now reading
+      the clinic before normalising a caller's phone for exactly this);
+      none does an extra table read solely to fetch it. See
+      `progress-tracker.md` → Open Questions (resolved) for the reasoning
+      and `backend/tools/validation.py` → `normalise_phone` for the exact
+      rule, including its idempotency guard (needed because
+      `patients.find_patient` re-normalises a value `find_patients_by_phone`
+      is about to normalise again).
   - `Escalations` — partition key `clinic_id`, sort key
     `escalation_id`. What was flagged, why, resolved status. One index:
     - `by-created-at` (`clinic_id` / `created_at`) — the dashboard

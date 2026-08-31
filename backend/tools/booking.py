@@ -46,6 +46,7 @@ from .schema import (
     CLINIC_ID,
     AppointmentAttrs,
     AppointmentStatus,
+    ClinicAttrs,
     PatientAttrs,
     ServiceAttrs,
     clinic_patient_key,
@@ -131,6 +132,10 @@ def book_appointment(
             unusable. A deployment fault; never read out to a patient.
     """
     # Tenant boundary first, before any read (`code-standards.md` -> Python).
+    # Shape only here -- `patient_phone` is re-normalised below with the
+    # clinic's own `country_code`, once the clinic has been read for its
+    # other config anyway; this first pass still rejects a malformed number
+    # before any read, exactly as the other arguments are validated here.
     clinic_id = require_clinic_id(clinic_id)
     requested_start = require_timestamp(starts_at, "starts_at")
     name = require_text(patient_name, "patient_name", max_length=MAX_IDENTIFIER_LENGTH)
@@ -143,6 +148,8 @@ def book_appointment(
     clinic = get_clinic(clinic_id)
     zone = clinic_timezone(clinic)
     service_entry = resolve_service(clinic, service)
+    country_code = clinic.get(ClinicAttrs.COUNTRY_CODE)
+    phone = normalise_phone(phone, "patient_phone", country_code)
 
     # The clinic-local day the requested instant falls on -- the day whose
     # `hours` decide it. Derived from the instant rather than taken as an
@@ -164,7 +171,7 @@ def book_appointment(
     # Only now is a record created: a caller who asked for an impossible
     # time should not leave a patient row behind.
     patient, created = lookup_or_create_patient(
-        clinic_id, phone=phone, name=name, email=email
+        clinic_id, phone=phone, name=name, email=email, country_code=country_code
     )
     patient_id = patient[PatientAttrs.PATIENT_ID]
 

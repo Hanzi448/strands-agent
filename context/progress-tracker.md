@@ -1832,6 +1832,58 @@ Update this file after every meaningful implementation change.
   connection — that needs `frontend/src/voice/` (not yet built) and the
   same blocked `cdk deploy` as Next Up #1.
 
+- **Phone country-code reconciliation, in `backend/tools/`** (part of
+  Next Up #2 — old #2 said "settle the phone-number country-code question
+  first," so this unit settled it *and* wrote the code, rather than
+  leaving the resolution as a paper decision the seed scripts would have
+  to reinterpret). Confirmed with the user first (see Open Questions,
+  resolved): one country code per clinic, over leaving it unresolved or
+  matching on a digit suffix.
+  **`Clinics` gains one optional attribute.** `schema.ClinicAttrs.COUNTRY_CODE`
+  ("country_code", digits only, no leading `+`) is documented as a
+  separate concern from the four availability-config attributes it sits
+  beside — a clinic with none set leaves phone handling exactly as it was,
+  so this is additive and does not touch `data_stack.py` (DynamoDB enforces
+  no non-key attributes; nothing CDK-side to change).
+  **`validation.normalise_phone` takes it as an optional third argument.**
+  A value with no explicit `+`/`00` international marker is assumed
+  dialled from inside that country and gets the code prepended; a value
+  that already carries the marker is left as the international number it
+  is — the marker is stripped, never the digits after it. Skipped when
+  `digits` already starts with the code, which does two jobs at once: it
+  makes the function idempotent on its own output (needed because
+  `patients.find_patient` re-normalises a value `find_patients_by_phone`
+  is about to normalise again with the same `country_code` — without the
+  guard the second pass would double the code on), and it is the accepted
+  cost for a national number that happens to start with the same digits as
+  the code (left unprefixed rather than risking a wrong double-prepend).
+  **Every call site threads it from a clinic it already holds, never from
+  an extra read.** `booking.book_appointment` re-orders its own
+  validation: `patient_phone` is still shape-checked before any table read
+  (the existing `clinics.requested == []` tests for a bad name/phone still
+  hold), then re-normalised with `country_code` once the clinic has been
+  read anyway for `timezone`/services. `appointments._resolve_appointment`
+  already held the clinic and needed one line.
+  `appointments.find_upcoming_appointments` did not previously read the
+  clinic at all; it now does, purely for this — a deliberate, documented
+  behaviour change (a new `NotFoundError` for an unknown `clinic_id`,
+  matching the precedent `list_appointments_for_clinic` already set, and
+  one that cannot fire in practice since `ClinicSession.start` already
+  validates `clinic_id` before any tool runs).
+  Verified: `pytest` from `backend/` — **730 passed** (719 before, 11
+  new), the pre-existing 719 unchanged. New coverage: `normalise_phone`
+  converging every marker/no-marker/`00`-prefix spelling of one number
+  under a given `country_code`, its idempotency on its own output, and
+  that omitting `country_code` leaves the old two-key behaviour exactly as
+  it was; `lookup_or_create_patient` finding a patient seeded in the
+  international form from a nationally-spoken call, and *not* finding them
+  when `country_code` is omitted; `book_appointment` and
+  `find_upcoming_appointments` doing the same end to end through a clinic
+  fixture carrying `country_code`.
+  **Not yet touched**: `seed/` itself, which does not exist. This unit
+  fixes the number *format* the seed scripts need to agree on; writing
+  them is the rest of Next Up #2.
+
 ## In Progress
 
 - None.
@@ -1902,8 +1954,11 @@ are in Completed below; the numbered list is renumbered accordingly.
    user pool now exists to hold them — `admin-create-user` /
    `admin-set-user-password`, each with its `custom:clinic_id` set), and
    FAQ documents for the Knowledge Base.
-   Settle the phone-number country-code question below first: this is
-   the step that fixes a number format. Also what will let
+   The phone-number country-code question that blocked this is now
+   resolved and implemented (see Completed): `Clinics` takes an optional
+   `country_code`, so the seed scripts have a fixed number format to write
+   — a UK-based demo clinic seeds `country_code: "44"` and can write its
+   sample phone numbers in either form. Also what will let
    `NO_SHOW_RISK_THRESHOLD` (`tools/automation.py`) be judged against real
    data rather than argued about. Also what a verified SES sender
    identity needs to exist for, so `CLINICPILOT_REMINDER_SENDER_EMAIL`
@@ -2169,20 +2224,31 @@ are in Completed below; the numbered list is renumbered accordingly.
   fuzzier name match for reads while keeping the strict one for
   registration. Not blocking, and deliberately not softened on a guess.
 
-- **Does a spoken phone number need a default country code?**
-  `normalise_phone` now stores digits only, so every *format* of one
-  number converges. What does not converge is a national number against
-  its international form: a patient who says "555 123 4567" on their
-  first call and "plus one, 555 123 4567" on their second gets two
-  patient records. Fixing it means assuming a country code (the demo
-  clinics are `Europe/London`, which argues `+44`, but the seeded
-  numbers are not written yet), and that is product behaviour no context
-  file states. Options: (a) assume one country code per clinic, stored
-  on the clinic item alongside `timezone`; (b) leave it, and have the
-  seed scripts and the agent prompt use one consistent form; (c) match
-  on a digit *suffix*, which risks collisions. Not blocking —
-  `book_appointment` works either way — but it should be settled before
-  the seed scripts fix a number format.
+- ~~**Does a spoken phone number need a default country code?**~~
+  **Resolved** — option (a): one country code per clinic, put to the user
+  rather than defaulted (`ai-workflow-rules.md` → Handling Missing
+  Requirements) ahead of option (b) (leave it, seed scripts/prompt use one
+  consistent form) and option (c) (match on a digit suffix, rejected here
+  too as collision-prone). `Clinics` gains an optional `country_code`
+  (`schema.ClinicAttrs.COUNTRY_CODE`, digits only, no leading `+`,
+  alongside `timezone`); `validation.normalise_phone` takes it as an
+  optional third argument and, when given, prepends it to a number with no
+  explicit `+`/`00` marker rather than leaving national and international
+  spellings as two keys. `None` (a clinic with nothing set) is the old
+  behaviour, unchanged. Implemented in `backend/tools/`: `booking.py`
+  reorders its own validation so the tenant-boundary/no-read-before-
+  validation shape check still runs first, then re-normalises with the
+  clinic's code once it has been read anyway for its other config;
+  `appointments.find_upcoming_appointments` now reads the clinic for the
+  same reason (a new, documented `NotFoundError` case, matching
+  `list_appointments_for_clinic`'s existing one); `_resolve_appointment`
+  already held the clinic and needed only the one extra line.
+  `patients.py`'s three functions take `country_code` as an optional
+  keyword and thread it into their own `normalise_phone` calls — this is
+  also where the idempotency guard earned its keep: `find_patient` calls
+  `find_patients_by_phone` with an *already-normalised* phone and the same
+  `country_code`, so `normalise_phone` had to not double-prepend on a
+  second pass over its own output. See Completed.
 
 - **Slot contention between the re-check and the write.**
   `book_appointment` re-checks availability immediately before writing,

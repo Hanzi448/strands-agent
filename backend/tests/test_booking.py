@@ -195,6 +195,30 @@ def test_a_patient_at_another_clinic_is_not_reused(tables) -> None:
     assert patients_fake.puts[0]["Item"]["clinic_id"] == DENTAL_ID
 
 
+def test_a_clinics_country_code_reconciles_a_nationally_spoken_number(tables) -> None:
+    """A caller heard as a phone number known in stored (international) form.
+
+    The clinic's own `country_code` is what `patients.py` threads through
+    for exactly this: without it these are two different keys
+    (`test_validation.py`), and the caller would be booked as new.
+    """
+    _, _, patients_fake = tables(
+        clinics=FakeClinicsTable({**dental_clinic(), "country_code": "1"}),
+        patients_table=FakePatientsTable(
+            {
+                "clinic_id": DENTAL_ID,
+                "patient_id": "pat_existing",
+                "name": NAME,
+                "phone": PHONE,
+            }
+        ),
+    )
+    result = book(patient_phone="555 123 4567")
+    assert result["patient"]["is_new"] is False
+    assert result["patient"]["patient_id"] == "pat_existing"
+    assert patients_fake.puts == []
+
+
 # --------------------------------------------------------------------------
 # Availability is re-checked, not restated
 # --------------------------------------------------------------------------
