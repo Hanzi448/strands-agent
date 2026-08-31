@@ -54,6 +54,7 @@ from tests.test_appointments import NAME, NINE, NINE_FIFTEEN, PHONE, booked
 from tests.test_booking import FakePatientsTable
 from tests.test_escalation_agent import REASON
 from tests.test_escalations import FakeEscalationsTable
+from tests.test_faq import DENTAL_KB_ENV, FakeBedrockAgentRuntimeClient
 from tests.test_scheduling import (
     COSMETIC_ID,
     DENTAL_ID,
@@ -67,13 +68,37 @@ from tests.test_scheduling_agent import (
     ScriptedModel,
     WritableAppointmentStore,
 )
-from tools import appointments, booking, escalations, patients, scheduling
+from tools import appointments, booking, escalations, faq, patients, scheduling
 from tools.errors import ConfigurationError, NotFoundError, ValidationError
 from tools.schema import AppointmentAttrs, EscalationAttrs, EscalationSource
 
-ASSISTANTS = ["scheduling_assistant", "escalation_assistant"]
+ASSISTANTS = ["scheduling_assistant", "faq_assistant", "escalation_assistant"]
 
 NOW = "2026-06-30T09:00:00Z"
+
+
+@pytest.fixture(autouse=True)
+def clean_faq_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run each test against an unconfigured Knowledge Base, whatever the
+    shell has -- the same isolation `test_faq.py` gives `query_faq`
+    itself."""
+    monkeypatch.delenv(DENTAL_KB_ENV, raising=False)
+    faq._bedrock_agent_runtime_client.cache_clear()
+
+
+@pytest.fixture
+def faq_kb(monkeypatch: pytest.MonkeyPatch):
+    """Point `tools/faq.py` at a fake Bedrock client and give the dental
+    clinic a Knowledge Base id -- separate from `tables()` because it is
+    a different tool module, reached only through `faq_assistant`."""
+
+    def install(*passages: str) -> FakeBedrockAgentRuntimeClient:
+        fake = FakeBedrockAgentRuntimeClient(*passages)
+        monkeypatch.setattr(faq, "_bedrock_agent_runtime_client", lambda: fake)
+        monkeypatch.setenv(DENTAL_KB_ENV, "kb-dental-123")
+        return fake
+
+    return install
 
 
 @pytest.fixture
@@ -155,7 +180,13 @@ def test_the_front_desk_holds_exactly_the_two_assistants() -> None:
 
 
 @pytest.mark.parametrize(
-    "name", [*SCHEDULING_TOOL_NAMES, "create_escalation", "find_upcoming_appointments"]
+    "name",
+    [
+        *SCHEDULING_TOOL_NAMES,
+        "create_escalation",
+        "find_upcoming_appointments",
+        "query_faq",
+    ],
 )
 def test_no_tool_layer_function_is_reachable_from_the_front_desk(name: str) -> None:
     """Named individually, so wiring one up fails a test that says why.
@@ -388,6 +419,45 @@ def test_the_assistants_answer_is_what_the_front_desk_reads(tables) -> None:
     assert result["content"][0]["text"] == (
         "Quarter past nine or half past are free on Wednesday."
     )
+
+
+def test_a_price_question_reaches_the_faq_assistant_not_staff(tables, faq_kb) -> None:
+    """The route the FAQ sub-agent adds: a published fact now comes back
+    as an answer, not a card in the escalation queue."""
+    _, _, _, escalations_fake = tables()
+    fake = faq_kb("A cleaning costs £60 and takes about half an hour.")
+    model = ScriptedModel(
+        ("tool", ("faq_assistant", {"request": "How much is a cleaning?"})),
+        ("tool", ("query_faq", {"question": "How much is a cleaning?"})),
+        ("text", "A cleaning is £60."),
+        ("text", "A cleaning costs £60."),
+    )
+    answer = build_orchestrator(dental_session(), model)("How much is a cleaning?")
+
+    assert "£60" in str(answer)
+    assert fake.calls[0]["knowledgeBaseId"] == "kb-dental-123"
+    assert escalations_fake.puts == []
+
+
+def test_a_faq_miss_that_still_needs_an_answer_is_escalated(tables, faq_kb) -> None:
+    """What `faq_assistant` cannot answer is not silently dropped: the
+    front desk still has to decide whether the patient needs a human,
+    exactly as it does for anything else an assistant hands back."""
+    _, _, _, escalations_fake = tables()
+    faq_kb()
+    model = ScriptedModel(
+        ("tool", ("faq_assistant", {"request": "Do you offer valet parking?"})),
+        ("tool", ("query_faq", {"question": "Do you offer valet parking?"})),
+        ("text", "I do not have that information."),
+        ("tool", ("escalation_assistant", {"request": "Wants to know about valet parking."})),
+        ("tool", ("create_escalation", {"reason": "Wants to know about valet parking."})),
+        ("text", "Recorded for staff."),
+        ("text", "I don't have that, but a member of staff will follow up."),
+    )
+    answer = build_orchestrator(dental_session(), model)("Do you offer valet parking?")
+
+    assert "member of staff" in str(answer)
+    assert len(escalations_fake.puts) == 1
 
 
 def test_a_refund_question_reaches_the_escalation_queue(tables) -> None:

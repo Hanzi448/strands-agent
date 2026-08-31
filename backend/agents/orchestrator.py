@@ -4,10 +4,10 @@
 patient, work out what they want, and route it to the sub-agent that can
 do it. `architecture.md` -> Invariants #2 gives it the fourth by
 implication: it is the *only* agent the outside world reaches, and the
-Scheduling and Escalation agents exist for it alone.
+Scheduling, FAQ and Escalation agents exist for it alone.
 
 **It holds no `backend/tools/` function.** Its entire tool surface is the
-two Agent-as-Tool wrappers, each of which takes a request in words. So
+three Agent-as-Tool wrappers, each of which takes a request in words. So
 there is no path by which the front desk writes to DynamoDB itself: a
 booking is something it asks for and is told about, which is what keeps
 the appointment rules in one place (Invariants #3) and keeps this module
@@ -28,10 +28,13 @@ today's local date and the services on offer -- enough to ask "which
 treatment?" and no more. Anything else it tells a patient has to have
 come back from an assistant in the same conversation.
 
-Until the FAQ sub-agent lands with the Knowledge Base, a question about
-prices or preparation has exactly one route: a member of staff, via
-`escalation_assistant`. That is the correct answer today and a lossy one
--- the KB unit is what turns those into answers rather than callbacks.
+A question about prices, treatments, preparation or policy now has its
+own route, `faq_assistant`, over the clinic's own Knowledge Base -- it no
+longer becomes a staff callback by default. `escalation_assistant`
+remains the route for anything the FAQ assistant could not answer and
+the patient still needs settled, and for everything that was never a
+published fact to begin with (a refund, a complaint, a clinical
+judgement).
 
 Everything is per session, as in the sub-agent modules: the tools are
 bound to one clinic, and a module-level agent would be the process-level
@@ -48,6 +51,7 @@ from strands.models.model import Model
 from strands.tools.decorator import DecoratedFunctionTool
 
 from .escalation_agent import escalation_agent_tool
+from .faq_agent import faq_agent_tool
 from .scheduling_agent import scheduling_agent_tool
 from .session import ClinicSession
 
@@ -89,14 +93,17 @@ reference number or a timestamp.
 
 {clinic}
 
-You have two assistants and no other way of doing anything. You do not know this
-clinic's diary, its prices, its treatments or its policies. Anything you tell the
-patient about them must have come back from an assistant in this conversation.
+You have three assistants and no other way of doing anything. You do not know
+this clinic's diary, its prices, its treatments or its policies. Anything you
+tell the patient about them must have come back from an assistant in this
+conversation.
 
 - scheduling_assistant: the appointment diary -- when the clinic is free,
   booking, moving and cancelling.
+- faq_assistant: prices, treatments, preparation and policy questions -- what
+  the clinic has published about itself. Not the diary.
 - escalation_assistant: writing something down for a member of clinic staff to
-  deal with, for anything neither you nor the scheduling assistant can settle.
+  deal with, for anything none of your other assistants can settle.
 
 How to work:
 
@@ -118,11 +125,16 @@ How to work:
   for a reason the patient cannot do anything about, that is yours to decide:
   either ask the patient the question that unblocks it, or send it to the
   escalation assistant.
-- Send it to a member of staff when the patient asks about prices, treatments,
-  clinical or preparation advice, billing, insurance, a refund or a complaint;
-  when they are upset or ask to speak to a person; or when something in the
-  system has failed and the patient cannot do anything about it. Once for each
-  thing -- a second call puts a second card in the clinic's queue.
+- Send a question about prices, treatments, preparation or policy to the faq
+  assistant first -- it knows what the clinic has published, you do not. Only
+  send it to a member of staff instead if the faq assistant says it does not
+  have the answer and the patient still needs one settled.
+- Send it to a member of staff when the patient asks for clinical judgement,
+  billing, insurance, a refund or a complaint; when they are upset or ask to
+  speak to a person; when the faq assistant could not answer and the patient
+  still needs one; or when something in the system has failed and the patient
+  cannot do anything about it. Once for each thing -- a second call puts a
+  second card in the clinic's queue.
 - Something the patient can settle themselves is not an escalation. A time that
   has been taken, a name that does not match the phone number, a day the clinic
   is closed: ask them about it, do not put it in front of staff.
@@ -140,27 +152,28 @@ How to work:
 def orchestrator_tools(
     session: ClinicSession, model: Model | str | None = None
 ) -> list[DecoratedFunctionTool]:
-    """The two sub-agents, as the only tools the front desk holds.
+    """The three sub-agents, as the only tools the front desk holds.
 
     Deliberately not a place where a `backend/tools/` function could be
     added "just for a quick lookup": the Orchestrator's surface is words
     in, words out, and everything that touches the clinic's data does so
-    behind one of these two.
+    behind one of these three.
 
     Args:
         session: The clinic this conversation is pinned to. Closed over
-            by both sub-agents, so no tool here has a `clinic_id`
+            by every sub-agent, so no tool here has a `clinic_id`
             parameter and the model is never offered a clinic
             (`architecture.md` -> Invariants #1).
-        model: Passed down to both sub-agents, so one session runs on one
+        model: Passed down to every sub-agent, so one session runs on one
             model throughout.
 
     Returns:
-        `scheduling_assistant` and `escalation_assistant`, in the order a
-        call uses them.
+        `scheduling_assistant`, `faq_assistant` and `escalation_assistant`,
+        in the order a call is likely to reach them.
     """
     return [
         scheduling_agent_tool(session, model),
+        faq_agent_tool(session, model),
         escalation_agent_tool(session, model),
     ]
 
@@ -176,16 +189,16 @@ def build_orchestrator(
 
     Args:
         session: The clinic this conversation is pinned to.
-        model: Which model to run on, for this agent and both sub-agents.
-            `None` leaves the Strands default, which is still an open
-            question rather than a decision -- `architecture.md` -> Stack
-            names Nova Sonic for the voice layer and says nothing about
-            the text model behind it. One parameter threads through all
-            three agents, so that when it is settled there is one place
-            to settle it.
+        model: Which model to run on, for this agent and all three
+            sub-agents. `None` leaves the Strands default, which is still
+            an open question rather than a decision -- `architecture.md`
+            -> Stack names Nova Sonic for the voice layer and says
+            nothing about the text model behind it. One parameter threads
+            through all four agents, so that when it is settled there is
+            one place to settle it.
 
     Returns:
-        An `Agent` holding `scheduling_assistant` and
+        An `Agent` holding `scheduling_assistant`, `faq_assistant` and
         `escalation_assistant`, and a system prompt carrying this
         clinic's name, local date and services.
     """

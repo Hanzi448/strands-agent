@@ -409,6 +409,7 @@ def test_a_typed_line_reaches_the_tool_layer_and_comes_back(tables) -> None:  # 
     assert f"{AGENT_PREFIX}We have quarter past nine or half past." in output
     assert [request["tool_names"] for request in model.requests][0] == [
         "scheduling_assistant",
+        "faq_assistant",
         "escalation_assistant",
     ]
     assert agent.messages[0]["content"][0]["text"] == (

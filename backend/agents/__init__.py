@@ -25,6 +25,12 @@ Modules:
         act on -- and keeping a broken deployment out of a patient's ear.
     scheduling_agent: the Scheduling sub-agent -- availability, booking,
         rescheduling, cancellation -- and its Agent-as-Tool wrapper.
+    faq_agent: the FAQ sub-agent -- prices, treatments, preparation and
+        policy questions, answered from passages `tools/faq.py` retrieves
+        out of the clinic's own Bedrock Knowledge Base -- and its
+        Agent-as-Tool wrapper. It holds `query_faq` alone and never
+        decides to escalate; whether a question it could not answer goes
+        to a member of staff is the Orchestrator's call.
     escalation_agent: the Escalation sub-agent -- the handover to a human
         (Invariants #6) -- and its Agent-as-Tool wrapper. It holds
         `create_escalation` alone: the escalation *reads* are staff-only
@@ -46,7 +52,6 @@ Modules:
         Runtime. The one interface here a patient's own browser reaches;
         `cli` and `mic` are for development only.
 
-Still to land: `faq_agent`, which waits on the Knowledge Base. Until the
-FAQ sub-agent exists, a question about prices or preparation routes to a
-member of staff rather than to an answer.
+The agent tree is now complete: three sub-agents, one Orchestrator, over
+both local interfaces and the deployed one.
 """

@@ -12,22 +12,26 @@ Update this file after every meaningful implementation change.
   stacks — API, automation, frontend — are still empty). `backend/tools/`
   has its foundation, the complete availability read surface, the
   complete scheduling write surface, the complete escalation surface,
-  and now the FAQ read (`query_faq`, over the Knowledge Base
-  infrastructure that landed just before it). All four tables are
-  written by that layer, and `backend/tools/` itself is now complete —
-  five modules, no tool left to write. What remains of Next Up #2 is the
-  agent-layer half: `faq_agent.py` and its wiring into the Orchestrator.
+  and the FAQ read (`query_faq`, over the Knowledge Base infrastructure
+  that landed just before it). All four tables are written by that
+  layer, and `backend/tools/` itself is complete — five modules, no tool
+  left to write.
+- **The agent tree is now complete: three sub-agents, not two.**
+  `faq_agent.py` (Next Up #2) has landed and is wired into the
+  Orchestrator, so `backend/agents/` now holds Scheduling, FAQ and
+  Escalation, all three reachable only as tools of the one Orchestrator
+  a patient talks to. Next Up #2 is fully done — see Completed.
 - `backend/agents/` now holds its **foundation** (`session.py`,
-  `results.py`), **both patient-facing sub-agents** — Scheduling
-  (`scheduling_agent.py`) and Escalation (`escalation_agent.py`) — the
-  **Orchestrator** (`orchestrator.py`) that routes to them, the **voice
-  layer** (`voice.py`: the same Orchestrator built as a `BidiAgent` over
-  Nova Sonic), and **both local interfaces** — `cli.py` (keyboard) and
-  `mic.py` (microphone). The agent tree is complete, wired, and drivable
-  two ways: a typed turn or a spoken one goes in, reaches
-  `backend/tools/`, and comes back out as a sentence.
-  `faq_agent.py` does not exist yet. `frontend/`, `backend/lambda/` and
-  `seed/` do not exist yet.
+  `results.py`), **all three patient-facing sub-agents** — Scheduling
+  (`scheduling_agent.py`), FAQ (`faq_agent.py`) and Escalation
+  (`escalation_agent.py`) — the **Orchestrator** (`orchestrator.py`)
+  that routes to them, the **voice layer** (`voice.py`: the same
+  Orchestrator built as a `BidiAgent` over Nova Sonic), and **both
+  local interfaces** — `cli.py` (keyboard) and `mic.py` (microphone).
+  The agent tree is complete, wired, and drivable two ways: a typed
+  turn or a spoken one goes in, reaches `backend/tools/`, and comes
+  back out as a sentence. `frontend/`, `backend/lambda/` and `seed/`
+  do not exist yet.
 - **The local half of Phase 3 is finished.** `python -m agents.mic
   <clinic-id>` opens a Nova Sonic connection, pumps a microphone and
   speakers through `BidiAgent.run`, prints both sides of the call and
@@ -50,29 +54,27 @@ Update this file after every meaningful implementation change.
 
 ## Current Goal
 
-- **Phase 3: the agents.** The three-agent tree is in — Orchestrator
-  over Scheduling and Escalation — verified end to end offline, and
+- **Phase 3: the agents.** The full four-agent tree is in — Orchestrator
+  over Scheduling, FAQ and Escalation — verified end to end offline, and
   reachable three ways: `python -m agents.cli <clinic-id>` from a
   keyboard, `python -m agents.mic <clinic-id>` from a microphone, and
   (once deployed) `agents.agentcore_app:app`'s `/ws` from a browser.
-  Phase 3's remaining code is written; what remains of Next Up #1 is
+  All of Phase 3's code is now written; both remaining items are
+  infrastructure and data, not agent logic. Next Up #1 needs
   **provisioning and deploying it** (CDK resources, a Dockerfile, a
   container build) and **pointing any interface at something real**
-  (credentials plus seeded clinics, #5). That second one is now the
-  bottleneck for three
-  open questions at once — who greets the patient and what it costs in
-  dead air, which voice each clinic answers in, and which text model the
-  sub-agents reason with — all of which are answered by listening to one
-  call rather than by argument. The FAQ sub-agent waited for the
-  Knowledge Base to exist as infrastructure; that landed as its own
-  unit, and `query_faq` (the tool half of Next Up #2) has now landed
-  over it too (Completed, below). What is left of Next Up #2 is
-  `faq_agent.py` and wiring it into the Orchestrator.
+  (credentials plus seeded clinics, #5). That second one is the
+  bottleneck for three open questions at once — who greets the patient
+  and what it costs in dead air, which voice each clinic answers in,
+  and which text model the sub-agents reason with — plus one fact no
+  test can settle: whether a real Knowledge Base retrieval actually
+  reads back like an answer to a patient's question. All of it is
+  answered by listening to one call rather than by argument.
   Nothing in `backend/tools/` may move into an agent definition
   (`architecture.md` -> Invariants #3): the agents are a thin
   model-facing surface over functions the background Lambda will call
-  directly. After the FAQ sub-agent: AgentCore deploy, the background
-  Lambda, the dashboard, and the seed scripts.
+  directly. Next up: AgentCore deploy, the background Lambda, the
+  dashboard, and the seed scripts.
 
 ## Completed
 
@@ -1083,6 +1085,70 @@ Update this file after every meaningful implementation change.
   documents returns something a patient would recognise as an answer
   needs a real deploy (#1) and real documents (#5).
 
+- **`faq_agent.py` and its wiring into the Orchestrator** (Next Up #2,
+  agent half — the last piece of the old #2, and the last sub-agent the
+  agent tree needed). One module, a 31-test suite, plus edits to
+  `orchestrator.py` and `agents/__init__.py`.
+  **Same four-part shape as the other two sub-agents**: `faq_tools`,
+  `build_faq_agent`, `faq_agent_tool`, and `FAQ_SYSTEM_PROMPT` formatted
+  with `session.describe()`. It holds one tool, `query_faq`, for the
+  reason `escalation_agent.py` holds one tool and not four: the
+  patient-facing surface is exactly what a patient-facing agent needs
+  and nothing a staff-only reader would.
+  **It composes the answer; `query_faq` deliberately does not.**
+  `tools/faq.py`'s own docstring resolved `retrieve` over
+  `retrieve_and_generate` specifically so that phrasing stays a
+  sub-agent model's job — this agent is that job, over the passages
+  `query_faq` returns. The prompt tells it, in as many words, to answer
+  only from what it retrieved and never from its own knowledge of
+  dentistry or cosmetics — the same shape as `scheduling_agent`'s "never
+  reason about opening hours yourself," because a fluent model asked a
+  price question will invent a plausible one if allowed to, and a
+  plausible wrong price is worse than "I don't know."
+  **It does not decide to escalate.** `query_faq` returns `found: False`
+  as an ordinary answer, not a failure, and whether that becomes a card
+  in the staff queue is the Orchestrator's call
+  (`architecture.md` -> Invariants #2 and #6) — the same boundary
+  `escalation_agent.py` draws around raising an escalation at all. This
+  agent holds no `create_escalation` tool; its prompt says plainly that
+  it does not have the answer and stops, and the test suite pins that
+  the tool is absent by name, not merely uncalled.
+  **The Orchestrator's routing changed, not just its tool list.**
+  `orchestrator_tools` now returns three wrappers —
+  `scheduling_assistant`, `faq_assistant`, `escalation_assistant` — and
+  `ORCHESTRATOR_SYSTEM_PROMPT` moved prices, treatments, preparation and
+  policy questions out of the escalation bullet and into a new one that
+  sends them to `faq_assistant` first; the escalation bullet keeps
+  everything that was never a published fact (billing, insurance, a
+  refund, a complaint, clinical judgement) and gained the FAQ assistant's
+  own "could not answer it" outcome as a fourth reason to raise a card.
+  A price or preparation question no longer becomes a staff callback by
+  default — the gap `query_faq`'s own Completed entry named as "correct,
+  and lossy" is closed for anything the clinic has actually published.
+  Verified: `pytest` from `backend/` — **666 passed** (633 before, 33
+  new: 31 in `test_faq_agent.py`, 2 new whole-call tests in
+  `test_orchestrator.py`), the pre-existing 633 unchanged except one
+  assertion in `test_agents_cli.py` that named the Orchestrator's tool
+  list literally and needed `faq_assistant` added to it — found by the
+  run, not missed by it. `test_faq_agent.py` follows
+  `test_escalation_agent.py`'s shape throughout: the surface is exactly
+  one tool, the wrapper is checked against `tools/faq.py` called
+  directly, a missing Knowledge Base id reaches the model as the shared
+  internal-failure message (not as a "no match" answer), and Agent-as-
+  Tool is driven end to end against the fake Bedrock client
+  `test_faq.py` already owns. `test_orchestrator.py` gained two whole-
+  call tests: a price question that reaches `faq_assistant` and answers
+  without touching the escalation queue, and a miss that the front desk
+  itself sends on to `escalation_assistant` — proving the hand-off is a
+  routing decision the Orchestrator makes, not something either
+  sub-agent decides on its own.
+  **Not verified, and cannot be yet**: anything against a real model or a
+  real Knowledge Base. Every script in the new suite is synthetic, and
+  whether a real patient's phrasing actually retrieves the passage that
+  answers it needs a deployed KB, real seeded documents, and a live
+  session (Next Up #1 and #4) — the same gap `query_faq`'s own entry
+  already named.
+
 ## In Progress
 
 - None.
@@ -1096,22 +1162,22 @@ same split applied to it (`ai-workflow-rules.md` -> When to Split Work:
 Python logic and its CDK deployment are separate steps) — the code half,
 `agents/agentcore_app.py`, is in Completed below. What remains of #1 is
 now purely infrastructure and a real call, and needs AWS resources that
-do not exist yet, which is why **#5 (seed) unblocks more than its
+do not exist yet, which is why **#4 (seed) unblocks more than its
 position suggests**: it is what turns either interface, and soon the
 deployed one, from a program that runs into a call someone can listen
 to, and it is where the greeting, voice and text-model questions get
 answered.
 
-The old #2 ("KB bucket plus the Bedrock Knowledge Base") has had the
-same infra/logic split applied to it as #1 did
-(`ai-workflow-rules.md` -> When to Split Work): the infrastructure half
-— the KB source bucket and one Bedrock Knowledge Base per demo clinic —
-is in Completed below. `backend/tools/faq.py` (the tool half) has now
-landed too, on the same reasoning: a tool over an already-provisioned
-resource is independently verifiable, while the sub-agent that wraps it
-and the Orchestrator prompt edit that routes to it are not splittable
-from each other (they are one wiring change). What remains of #2 is that
-second half.
+The old #2 ("KB bucket plus the Bedrock Knowledge Base, `faq_agent.py`,
+and its Orchestrator wiring") has been completed in full, across three
+units split by `ai-workflow-rules.md` -> When to Split Work: the
+infrastructure half (the KB source bucket and one Bedrock Knowledge Base
+per demo clinic), the tool half (`backend/tools/faq.py`), and now the
+agent half (`faq_agent.py` plus its wiring into `orchestrator.py`). All
+three are in Completed below. The agent tree — Orchestrator over
+Scheduling, FAQ and Escalation — is therefore finished; everything left
+in this list is infrastructure, background automation, dashboard, or
+content, not agent code.
 
 1. Provision AgentCore Runtime and deploy `agentcore_app.py` to it,
    then verify one voice session end-to-end. The Python side is done
@@ -1125,35 +1191,20 @@ second half.
    environment specifically**: see Session Notes — no AWS credentials
    are usable here for anything beyond local, offline work, so this item
    needs a session (or a person) that actually has them.
-2. Write `faq_agent.py` (the third sub-agent, same four-part shape as
-   `scheduling_agent.py`/`escalation_agent.py`, over the now-complete
-   `query_faq`), then wire `faq_agent_tool` into `orchestrator_tools` and
-   move price/prep/policy routing out of the escalation paragraph of
-   `ORCHESTRATOR_SYSTEM_PROMPT`. Testable offline exactly as the other
-   sub-agents were: a `ScriptedModel` stands in for the sub-agent's model
-   and `query_faq`'s own suite already proves the retrieval call against
-   a fake `bedrock-agent-runtime` client, so nothing here needs a
-   deployed KB or credentials. Each clinic's Knowledge Base id is a real
-   value only after `agent_stack.py` deploys (blocked, see #1's Session
-   Note); until then `query_faq` resolves it from an environment variable
-   (`knowledge_base_id_env_var`), and tests supply one directly. Note
-   what the gap costs today: the Orchestrator's only route for a price or
-   preparation question is `escalation_assistant`, so every FAQ becomes a
-   card in the staff queue. Correct, and lossy.
-3. Build the background Lambda + EventBridge schedule, reusing
+2. Build the background Lambda + EventBridge schedule, reusing
    `backend/tools/` functions. Its no-show/reschedule heuristic is not
    specified anywhere yet — per `ai-workflow-rules.md` -> When to Split
    Work that is a spec-then-implement step, not something to invent
    inline. Note the tool it needs already exists:
    `create_escalation(..., source="background")`.
-4. Build the staff dashboard (Cognito auth, appointment list,
+3. Build the staff dashboard (Cognito auth, appointment list,
    escalation queue). Its escalation reads are already written —
    `list_open_escalations`, `get_escalation`, `resolve_escalation`.
-5. Seed the two demo clinics (dental, cosmetic) with config,
+4. Seed the two demo clinics (dental, cosmetic) with config,
    sample appointments, and FAQ documents for the Knowledge Base.
    Settle the phone-number country-code question below first: this is
    the step that fixes a number format.
-6. Architecture diagram, README, demo video, submission assets.
+5. Architecture diagram, README, demo video, submission assets.
 
 ## Open Questions
 
