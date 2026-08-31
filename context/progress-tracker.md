@@ -121,6 +121,12 @@ Update this file after every meaningful implementation change.
   today, in this environment, touching no AWS client; the real run is
   blocked the same way Next Up #1's `cdk deploy` is (Session Notes). See
   Completed.
+- **The buildable half of the submission-assets item has landed.** A
+  root `LICENSE` (MIT), `docs/architecture.md` (a Mermaid system diagram),
+  and a rewritten root `README.md` now exist. What is left of Next Up #2
+  — demo video, live demo link, AWS Builder ID — is blocked on the same
+  missing deploy as Next Up #1, not on anything this environment could
+  still write.
 
 ## Current Goal
 
@@ -161,6 +167,43 @@ Update this file after every meaningful implementation change.
   see Next Up.
 
 ## Completed
+
+- **Root `LICENSE`, `docs/architecture.md`, and a rewritten root
+  `README.md`** (Next Up #2, first half — the buildable half of
+  "Architecture diagram, README, demo video, submission assets"). The
+  only unit this session could actually do: the other three (demo video,
+  live demo link, AWS Builder ID) all need a deployment or an account
+  action this environment cannot perform, same as Next Up #1 (Session
+  Notes).
+  **`LICENSE`** is MIT, satisfying the hackathon's "public repo with
+  MIT/Apache license" requirement — the repo root had none before this
+  (the only existing `LICENSE` was the vendored sample's own MIT-0, which
+  covers only `vendor/`).
+  **`docs/architecture.md`** is a Mermaid system diagram (renders natively
+  on GitHub) covering the full request paths — patient voice through the
+  guest Cognito identity pool to AgentCore, the Orchestrator's three
+  Agent-as-Tool sub-agents, `backend/tools/` as the single mutation path
+  for both the live agent and the background job, the per-clinic
+  Knowledge Base, and the staff dashboard's Cognito-gated REST path —
+  plus a short reading guide pointing each structural choice back at
+  `architecture.md` -> Invariants rather than restating them. It states
+  its own status honestly: designed and built in code/CDK, not yet
+  deployed.
+  **Root `README.md`** replaced a one-line stub. It covers project
+  summary, current status (built and offline-verified, not deployed, and
+  why), the stack table, an accurate repository layout (checked against
+  the real `backend/`, `frontend/`, `seed/` contents rather than assumed),
+  local run instructions for the four things this environment can
+  actually run (backend pytest, `cdk synth`, `npm run build`, seed
+  `--dry-run`), and a submission checklist section. No instruction here
+  claims something works that hasn't been verified — the deploy and seed
+  commands are named but marked blocked, consistent with
+  `progress-tracker.md` itself.
+  Nothing in `backend/`, `frontend/`, `seed/`, or `context/` (other than
+  this file) was touched — a docs-only unit, verified by reading the
+  written files back and by the Mermaid syntax following the same
+  quoted-label patterns used elsewhere (no live renderer available in
+  this environment to confirm visually).
 
 - **Vendored `aws-samples/sample-nova-sonic-websocket-agentcore`**
   (Next Up #1) at pinned commit
@@ -2099,7 +2142,20 @@ accordingly.
    sender identity needs to exist for, so
    `CLINICPILOT_REMINDER_SENDER_EMAIL` can finally be set on the
    background scan Lambda's environment (`automation_stack.py`).
-2. Architecture diagram, README, demo video, submission assets.
+2. **Demo video, live demo link, AWS Builder ID / builder.aws.com post.**
+   The architecture diagram and README half of the old #2 is done (see
+   Completed) — a root `LICENSE` (MIT) and `docs/architecture.md` (a
+   Mermaid system diagram plus a reading guide tying it back to
+   `architecture.md` -> Invariants) now exist too, alongside a rewritten
+   root `README.md` covering status, stack, repo layout, local run
+   instructions for every piece that *can* run here (tests, `cdk synth`,
+   frontend build, seed `--dry-run`), and a submission checklist. What
+   remains of this item is exactly what remains of #1: a demo video and a
+   live demo link both need something deployed and real to film/link, and
+   an AWS Builder ID is an account signup only the user can do, not
+   something this environment can act on. Folded together with #1 rather
+   than kept separate, since both are blocked by the same missing deploy
+   (Session Notes).
 
 ## Open Questions
 
