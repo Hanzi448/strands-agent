@@ -325,15 +325,21 @@ def test_blank_clinic_id_fails_before_any_read(clinic_id, tool, tables) -> None:
 
 
 def test_by_patient_query_is_keyed_on_the_clinic_patient_composite(tables) -> None:
-    """The index key is itself clinic-scoped (`architecture.md` -> #1)."""
+    """The index key is itself clinic-scoped (`architecture.md` -> #1).
+
+    `appointment_history_for_patient` queries the whole partition -- one
+    equality condition, not an AND with a `starts_at` range -- and filters
+    to `scheduled`/upcoming in Python (see its docstring), so the recorded
+    condition is the partition-key equality itself.
+    """
     _, store, _ = tables(appointment_items=one_checkup())
     drop()
     by_patient = next(
         query for query in store.queries if query["IndexName"] == "by-patient"
     )
     condition = by_patient["KeyConditionExpression"].get_expression()
-    partition = condition["values"][0].get_expression()
-    assert partition["values"][1] == f"{DENTAL_ID}#{PATIENT_ID}"
+    assert condition["operator"] == "="
+    assert condition["values"][1] == f"{DENTAL_ID}#{PATIENT_ID}"
 
 
 def test_another_clinics_appointment_is_invisible(tables) -> None:

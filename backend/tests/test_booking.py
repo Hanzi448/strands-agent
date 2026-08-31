@@ -53,6 +53,7 @@ class FakePatientsTable:
         self.items = [dict(item) for item in items]
         self.puts: list[dict[str, Any]] = []
         self.updates: list[dict[str, Any]] = []
+        self.gets: list[dict[str, Any]] = []
 
     def query(self, **kwargs: Any) -> dict[str, Any]:
         expression = kwargs["KeyConditionExpression"].get_expression()
@@ -66,6 +67,19 @@ class FakePatientsTable:
                 if item.get("clinic_id") == clinic_id and item.get("phone") == phone
             ]
         }
+
+    def get_item(self, *, Key: dict[str, Any]) -> dict[str, Any]:  # noqa: N803
+        self.gets.append(Key)
+        item = next(
+            (
+                candidate
+                for candidate in self.items
+                if candidate.get("clinic_id") == Key["clinic_id"]
+                and candidate.get("patient_id") == Key["patient_id"]
+            ),
+            None,
+        )
+        return {"Item": dict(item)} if item is not None else {}
 
     def put_item(self, **kwargs: Any) -> dict[str, Any]:
         self.puts.append(kwargs)

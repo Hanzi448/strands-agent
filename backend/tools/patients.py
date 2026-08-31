@@ -45,6 +45,7 @@ from .validation import (
     normalise_email,
     normalise_phone,
     require_clinic_id,
+    require_identifier,
     require_text,
 )
 
@@ -189,6 +190,35 @@ def find_patient(clinic_id: str, phone: str, name: str) -> dict[str, Any] | None
         if isinstance(stored, str) and _name_key(stored) == wanted:
             return candidate
     return None
+
+
+def get_patient(clinic_id: str, patient_id: str) -> dict[str, Any] | None:
+    """Fetch one patient by key, for a reader that already holds an id.
+
+    `find_patient` is for a voice caller, who has a phone number and a name
+    but no id; this is for the background job, which reads a `patient_id`
+    off an `Appointments` item and has no phone number to look one up by.
+
+    Args:
+        clinic_id: The clinic the patient belongs to. Part of the item's
+            key, so this cannot read across tenants.
+        patient_id: The patient, as stored.
+
+    Returns:
+        The `Patients` item, or `None` if this clinic has no patient with
+        that id. `None` rather than `NotFoundError`: a stale reference on
+        an old appointment is a fact for the caller to decide what to do
+        with (skip a reminder), not a failure of this read.
+
+    Raises:
+        ValidationError: If either id is missing or malformed.
+    """
+    clinic_id = require_clinic_id(clinic_id)
+    patient_id = require_identifier(patient_id, PatientAttrs.PATIENT_ID)
+    response = patients_table().get_item(
+        Key={PatientAttrs.CLINIC_ID: clinic_id, PatientAttrs.PATIENT_ID: patient_id}
+    )
+    return response.get("Item")
 
 
 def _create_patient(

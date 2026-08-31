@@ -58,7 +58,6 @@ from .schema import (
     CLINIC_PATIENT,
     DATE_FORMAT,
     LOCAL_TIME_FORMAT,
-    STARTS_AT,
     AppointmentAttrs,
     AppointmentStatus,
     PatientAttrs,
@@ -127,15 +126,10 @@ def find_upcoming_appointments(
 def upcoming_appointments_for_patient(
     clinic_id: str, patient_id: str
 ) -> list[dict[str, Any]]:
-    """The `by-patient` query itself, for a patient already resolved.
+    """One patient's still-scheduled appointments, earliest first.
 
-    Separate from `find_upcoming_appointments` because the background job
-    and the staff dashboard hold a `patient_id` already and have no phone
-    number to look one up by.
-
-    Queries `by-patient`, whose partition key is the composite
-    `{clinic_id}#{patient_id}` -- so "this patient's appointments" is not
-    expressible across clinics at all (`architecture.md` -> Invariants #1).
+    Separate from `find_upcoming_appointments` because the staff dashboard
+    holds a `patient_id` already and has no phone number to look one up by.
 
     Args:
         clinic_id: The clinic the patient belongs to.
@@ -146,6 +140,41 @@ def upcoming_appointments_for_patient(
         earliest first (the index's own order). An appointment already
         under way is excluded along with the past ones: its start is behind
         us, and it is not a thing a caller can still move.
+
+    Raises:
+        ValidationError: If either id is missing or malformed.
+    """
+    now = utc_now_iso()
+    return [
+        item
+        for item in appointment_history_for_patient(clinic_id, patient_id)
+        if str(item.get(AppointmentAttrs.STATUS, "")) == AppointmentStatus.SCHEDULED.value
+        and str(item.get(AppointmentAttrs.STARTS_AT, "")) >= now
+    ]
+
+
+def appointment_history_for_patient(
+    clinic_id: str, patient_id: str
+) -> list[dict[str, Any]]:
+    """Every appointment on record for one patient, any status, any time.
+
+    The `by-patient` query itself, unfiltered -- `upcoming_appointments_for_patient`
+    is this narrowed to `scheduled` and not-yet-started, and
+    `tools.automation`'s no-show risk check reads the whole history because
+    it needs *past* `no_show` entries, which that narrower read excludes by
+    design.
+
+    Queries `by-patient`, whose partition key is the composite
+    `{clinic_id}#{patient_id}` -- so "this patient's appointments" is not
+    expressible across clinics at all (`architecture.md` -> Invariants #1).
+
+    Args:
+        clinic_id: The clinic the patient belongs to.
+        patient_id: The patient, as stored.
+
+    Returns:
+        Every item under this patient's partition, earliest `starts_at`
+        first (the index's own order, across all statuses and all time).
 
     Raises:
         ValidationError: If either id is missing or malformed.
@@ -162,22 +191,12 @@ def upcoming_appointments_for_patient(
         "IndexName": APPOINTMENTS_BY_PATIENT_INDEX,
         "KeyConditionExpression": Key(CLINIC_PATIENT).eq(
             clinic_patient_key(clinic_id, patient_id)
-        )
-        & Key(STARTS_AT).gte(utc_now_iso()),
+        ),
     }
     items: list[dict[str, Any]] = []
     while True:
         response = table.query(**query)
-        # Status is filtered here rather than by a `FilterExpression`, for
-        # the reason `scheduling._booked_spans` gives: one patient's
-        # upcoming list is a handful of items, and keeping the rule in
-        # Python means the vocabulary stays one edit.
-        items.extend(
-            item
-            for item in response.get("Items", [])
-            if str(item.get(AppointmentAttrs.STATUS, ""))
-            == AppointmentStatus.SCHEDULED.value
-        )
+        items.extend(response.get("Items", []))
         next_key = response.get("LastEvaluatedKey")
         if not next_key:
             return items

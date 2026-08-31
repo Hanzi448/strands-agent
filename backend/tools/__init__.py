@@ -26,6 +26,10 @@ Modules:
     faq: `query_faq` -- passages from the clinic's own Bedrock Knowledge
         Base, for a sub-agent's model to phrase. The only module here that
         reads from something other than DynamoDB.
+    automation: `run_daily_scan` -- the background job's whole decision,
+        per appointment: escalate a patient's own no-show history, or send
+        a reminder. The only module here `backend/lambda/background_scan.py`
+        calls into.
 
 Nothing here imports Strands or AgentCore. The `@tool`-decorated agent
 surface lives in `backend/agents/`; this layer stays callable from a

@@ -60,18 +60,34 @@ EventBridge, Bedrock, and SES are all pay-per-use managed services.
   Model), `validation.py` (the boundary checks every tool runs first,
   including the `clinic_id` guard), `dynamo.py` (table handles,
   resolved from environment variables the CDK sets), `errors.py` (the
-  exception vocabulary tools raise). Nothing here imports Strands or
-  AgentCore, so the layer stays callable from a Lambda, a seed script,
-  or a test with no agent runtime present.
+  exception vocabulary tools raise). Also `automation.py`:
+  `run_daily_scan(clinic_id)`, the background job's whole per-appointment
+  decision (escalate on a patient's own no-show history, or send a
+  reminder) — the only module here `backend/lambda/background_scan.py`
+  calls into, so the rule lives in one place regardless of which process
+  runs it (Invariants #3). Nothing here imports Strands or AgentCore, so
+  the layer stays callable from a Lambda, a seed script, or a test with no
+  agent runtime present.
 - `backend/tests/` — Pytest suite for `backend/tools/`. Run from
   `backend/` (`pytest.ini` puts the package on the path); dependencies
   in `backend/requirements-dev.txt`. Not a runtime boundary, listed
   here because it is the verification step for every tool unit.
 - `backend/lambda/` — Lambda handlers: `background_scan.py`
-  (EventBridge-triggered autonomous loop), `dashboard_api.py`
+  (EventBridge-triggered autonomous loop; one invocation scans one clinic,
+  reading `clinic_id` off the triggering event's payload rather than
+  fanning out over every clinic itself — Invariants #1 — so the
+  EventBridge Scheduler infra is one schedule per seeded clinic, each with
+  its own `{"clinic_id": ...}` input), `dashboard_api.py`
   (Cognito-protected REST handlers for the staff dashboard),
   `voice_bridge.py` (WebSocket handler bridging the frontend to
-  AgentCore Runtime, if not connecting directly).
+  AgentCore Runtime, if not connecting directly). `lambda` is a Python
+  keyword, so nothing may import this package with an ordinary `import`/
+  `from` statement (a `SyntaxError`) — use
+  `importlib.import_module("lambda.background_scan")`, which resolves it
+  as a plain string at runtime with no parsing involved. This is also
+  exactly how the Lambda runtime itself resolves a configured handler
+  string, so it costs deployment nothing; it only affects code (tests,
+  a REPL) that wants to reach this package by name.
 - `backend/infra/` — AWS CDK (Python) app. One stack per concern:
   `data_stack.py` (DynamoDB, the KB source S3 bucket), `agent_stack.py`
   (AgentCore [not yet built] and one Bedrock Knowledge Base per demo

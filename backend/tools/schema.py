@@ -322,6 +322,31 @@ class ReminderEntry:
     OUTCOME: Final[str] = "outcome"
 
 
+class ReminderChannel(StrEnum):
+    """`ReminderEntry.CHANNEL` values. SES email is the only channel in
+    scope (`architecture.md` -> Stack); the vocabulary exists as an enum
+    rather than a bare string so a second channel is one member to add, not
+    a string to get right twice.
+    """
+
+    EMAIL = "email"
+
+
+class ReminderOutcome(StrEnum):
+    """`ReminderEntry.OUTCOME` values, landed by `tools.automation`, the
+    only writer of a `reminders` entry.
+
+    `SENT` and `FAILED` are the two facts `architecture.md` -> Storage Model
+    says staff need distinguished: "we reminded them" from "we tried and it
+    did not go" -- whether the failure is SES rejecting the send or the
+    patient having no address on file, both mean the same thing to a
+    person deciding whether to phone them instead.
+    """
+
+    SENT = "sent"
+    FAILED = "failed"
+
+
 class EscalationAttrs:
     """`Escalations` item: what was flagged, why, and whether it is handled.
 

@@ -58,6 +58,14 @@ Update this file after every meaningful implementation change.
   the way in, naming the cause. So the four system prompts remain
   unjudged by anything but a script, no audio has been heard, and every
   latency number `mic.py` was built to print is still unmeasured.
+- **The background job's whole decision now exists, and it is code, not
+  a plan.** `tools/automation.py` (`run_daily_scan`) and
+  `lambda/background_scan.py` implement Next Up #2's Python half: per
+  upcoming appointment, escalate a patient's own no-show history to staff
+  or send a reminder — never both, never an automatic reschedule (a
+  product decision the user made this session; see Completed). What
+  remains of #2 is purely CDK: an EventBridge Scheduler entry per clinic
+  and a deployed `Lambda` resource, now the new Next Up #2.
 
 ## Current Goal
 
@@ -82,8 +90,11 @@ Update this file after every meaningful implementation change.
   Nothing in `backend/tools/` may move into an agent definition
   (`architecture.md` -> Invariants #3): the agents are a thin
   model-facing surface over functions the background Lambda will call
-  directly. Next up: AgentCore deploy, the background Lambda, the
-  dashboard, and the seed scripts.
+  directly. The background job's own decision logic is now written and
+  tested (`tools/automation.py`, Next Up #2's old blocker resolved — see
+  Completed); what is left of it is CDK, not Python. Next up: AgentCore
+  deploy, the background job's EventBridge/Lambda wiring, the dashboard,
+  and the seed scripts.
 
 ## Completed
 
@@ -1267,6 +1278,130 @@ Update this file after every meaningful implementation change.
   AgentCore actually invoking it, and a real voice session over the
   deployed `/ws`.
 
+- **`tools/automation.py`: the background job's whole decision, and
+  `lambda/background_scan.py`, its thin entrypoint** (Next Up #2, tool +
+  Lambda-code half). `ai-workflow-rules.md` -> When to Split Work: agent/
+  tool logic and its CDK deployment are separate steps, the same split
+  `agentcore_app.py`/`agent_stack.py` already went through — this unit is
+  the Python logic; wiring an EventBridge Scheduler + a deployed Lambda
+  resource around it is the new Next Up #2 below.
+  **The no-show/reschedule heuristic was the blocker named in the old
+  Next Up #2**, and it needed answers no context file gave, so it was put
+  to the user rather than guessed (`ai-workflow-rules.md` -> Handling
+  Missing Requirements): (a) the signal is a patient's own count of past
+  `no_show` appointments at this clinic — the only signal available at
+  all, since reminders are one-way SES email and there is no confirmation
+  channel a "did they mean to come?" read could be taken from; (b) a
+  flagged appointment is **escalated to staff outright**, not
+  auto-rescheduled — `project-overview.md`'s middle option
+  ("attempt an automatic reschedule") is not implemented, so
+  `architecture.md` -> Invariants #6 holds by construction: the job's only
+  autonomous action is a rule this layer defines, and "guess a new time
+  nobody asked for" is not one; (c) one reminder, sent once, for anything
+  starting within 24 hours of the scan running.
+  **The decision per appointment is binary and mutually exclusive**:
+  escalate, or remind — never both, and `_process_appointment` returns
+  before reaching the reminder path once it escalates. It reads through
+  `tools.escalations.create_escalation` and (a new addition)
+  `tools.patients.get_patient`, never its own query or write, so the live
+  agent path and this job share every rule (Invariants #3).
+  **`NO_SHOW_RISK_THRESHOLD = 1` is not a product rule and was not asked
+  about** — a boundary decision of the same kind as
+  `escalations.DEFAULT_ESCALATION_LIMIT`, flagged here rather than buried.
+  Reversible: one constant, one reader. Raise it if the demo shows it
+  firing too eagerly.
+  **Idempotency comes from the appointment's own `reminders` list**, not a
+  second table: an appointment that already carries an entry is excluded
+  from the scan before any decision is made about it. The module docstring
+  notes this is a property of the once-daily/24-hour-window design, not a
+  guarantee enforced beyond the reminder branch — worth re-checking if the
+  schedule's cadence or window width ever changes, since nothing stops a
+  no-show escalation firing twice if an appointment somehow appeared in
+  two days' windows.
+  **One invocation is one clinic.** `background_scan.handler` reads
+  `clinic_id` off the triggering event and does nothing else — a decision
+  recorded in both modules' docstrings and in `architecture.md` ->
+  System Boundaries, since it fixes the shape the not-yet-built
+  EventBridge Scheduler infra must take: one schedule per seeded clinic,
+  each with its own `{"clinic_id": ...}` input, never a single schedule
+  fanning out across clinics inside one run (Invariants #1).
+  **`appointments.py` gained `appointment_history_for_patient`**, the
+  no-show count's read: the whole `by-patient` partition, every status,
+  every time — `upcoming_appointments_for_patient` is now this narrowed in
+  Python to `scheduled`/not-yet-started rather than restating the query,
+  which is what let the by-patient index range condition
+  (`Key(STARTS_AT).gte(now)`) be dropped in favour of a plain partition
+  read; small extra data transferred per patient (these tables are small —
+  `architecture.md` -> Storage Model already accepts this trade for
+  `list_open_escalations`), and one fewer query shape to keep in sync with
+  the no-show reader.
+  **`patients.py` gained `get_patient`**, the by-key counterpart to
+  `find_patient`: the background job holds a `patient_id` off an
+  appointment record and has no phone number to look one up by. Returns
+  `None` rather than raising on a stale reference, since what to do about
+  a patient record that vanished is the caller's call, not a failure of
+  the read itself.
+  **`schema.py` gained `ReminderChannel` and `ReminderOutcome`** — the two
+  value vocabularies `ReminderEntry`'s own docstring already said would
+  land with this job, the only writer of a `reminders` entry.
+  **SES sending is real, not stubbed**, behind `_send_reminder_email` —
+  `boto3.client("ses").send_email`, with the sender address read from
+  `CLINICPILOT_REMINDER_SENDER_EMAIL` (the verified personal Gmail,
+  Session Notes) and a `ClientError`/`BotoCoreError` caught and turned into
+  `ReminderOutcome.FAILED` rather than raised, since a bounced send is an
+  expected outcome for a batch job, not a programming fault. A missing
+  sender address is a `ConfigurationError` instead, and deliberately
+  **not** special-cased to abort the whole scan up front — it surfaces
+  identically for every due appointment via the same per-appointment
+  `ToolError` catch that guards a bad row, which is simpler than a second
+  code path for what is, in the end, the same fact reported N times
+  instead of once.
+  **One bad appointment cannot sink the scan.** `run_daily_scan` catches
+  `ToolError` per appointment (a service the clinic no longer offers, a
+  `patient_id` missing off a corrupt row) and records it as a `"failed"`
+  result rather than letting the whole clinic's run die on one row — a
+  batch-job property none of the live-call tools needed, since a live call
+  is already about one appointment at a time.
+  Landed on the way: `lambda/__init__.py`, the first file in
+  `backend/lambda/`. **`lambda` is a Python keyword**, so nothing may
+  reach this package with an ordinary `import`/`from` statement — only
+  `importlib.import_module("lambda.background_scan")` works, which is also
+  exactly how the Lambda runtime itself resolves a configured handler
+  string, so deployment pays nothing for this; it only affects code (this
+  suite, a REPL) that wants to reach the package by name. Documented in
+  `architecture.md` -> System Boundaries so it is not rediscovered by the
+  next thing that tries a plain import and hits a `SyntaxError`.
+  Verified: `pytest` from `backend/` — **688 passed** (667 before, 21
+  new), the pre-existing 667 unchanged except one test updated to match
+  `appointment_history_for_patient`'s simpler (single-condition) query
+  shape rather than the old two-condition one
+  (`test_by_patient_query_is_keyed_on_the_clinic_patient_composite`) — a
+  query-shape change, not a behaviour change; the same 254+61+... case
+  coverage for reschedule/cancel still passes unchanged. The new suite
+  drives `run_daily_scan` end to end against the real `by-start-time` and
+  `by-patient` queries (the same `FakeAppointmentStore` `test_appointments.py`
+  owns, which actually evaluates key conditions and applies
+  `UpdateExpression`s rather than only recording them) and a real
+  `FakeEscalationsTable`/`FakePatientsTable` — no credentials, no moto, no
+  network, and `_send_reminder_email` stubbed rather than hitting SES.
+  Covered: escalate-vs-remind on both sides of the threshold, a
+  housemate's no-show history staying invisible (by-patient isolation), a
+  cross-clinic appointment staying invisible to the wrong clinic's scan,
+  the reminder window's edges (too far ahead, already started, already
+  reminded, cancelled), a missing email short-circuiting before any SES
+  call, a rejected SES send recorded as `failed` rather than raised, one
+  bad row not stopping a good one in the same scan, and the sender-env
+  helper both unset (`ConfigurationError`) and set-with-whitespace
+  (trimmed). `lambda/background_scan.py` itself is driven through
+  `importlib.import_module`, asserting it forwards `clinic_id` unchanged
+  and that a `ToolError` is logged before it propagates rather than being
+  swallowed.
+  **Not verified, and cannot be yet**: an actual SES send (needs a
+  verified sender identity and credentials this environment does not
+  have — Session Notes), and whether `NO_SHOW_RISK_THRESHOLD = 1` reads as
+  the right sensitivity against real seeded data, which needs Next Up #4
+  (seed) before it can be judged rather than argued.
+
 ## In Progress
 
 - None.
@@ -1313,19 +1448,28 @@ content, not agent code.
    Docker and no AWS credentials are usable here for anything beyond
    local, offline work, so this item needs a session (or a person) that
    actually has both.
-2. Build the background Lambda + EventBridge schedule, reusing
-   `backend/tools/` functions. Its no-show/reschedule heuristic is not
-   specified anywhere yet — per `ai-workflow-rules.md` -> When to Split
-   Work that is a spec-then-implement step, not something to invent
-   inline. Note the tool it needs already exists:
-   `create_escalation(..., source="background")`.
+2. Wire `backend/lambda/background_scan.py` into `automation_stack.py`:
+   an EventBridge Scheduler schedule per seeded clinic (each with its own
+   `{"clinic_id": ...}` input — Invariants #1), a deployed `Lambda`
+   resource for the handler, and an execution role scoped to that
+   Lambda's own needs (the four DynamoDB tables `backend/tools/` reaches,
+   plus `ses:SendEmail`, scoped to the verified sender identity once one
+   exists — `code-standards.md` -> AWS CDK forbids a blanket resource/
+   action grant). The Python logic and its own tests are done (see
+   Completed, `tools/automation.py` + `lambda/background_scan.py`) — this
+   is now purely the CDK half, the same split `agentcore_app.py`/
+   `agent_stack.py` went through. `CLINICPILOT_REMINDER_SENDER_EMAIL`
+   needs setting on the Lambda's environment once a sender identity is
+   verified in SES.
 3. Build the staff dashboard (Cognito auth, appointment list,
    escalation queue). Its escalation reads are already written —
    `list_open_escalations`, `get_escalation`, `resolve_escalation`.
 4. Seed the two demo clinics (dental, cosmetic) with config,
    sample appointments, and FAQ documents for the Knowledge Base.
    Settle the phone-number country-code question below first: this is
-   the step that fixes a number format.
+   the step that fixes a number format. Also what will let
+   `NO_SHOW_RISK_THRESHOLD` (`tools/automation.py`) be judged against real
+   data rather than argued about.
 5. Architecture diagram, README, demo video, submission assets.
 
 ## Open Questions
@@ -1503,6 +1647,22 @@ content, not agent code.
   place an answer could drift from `ORCHESTRATOR_SYSTEM_PROMPT`'s honesty
   rules. See Completed for what this decided in code: `query_faq` returns
   `{"passages": [...], "found": bool}`, never a composed sentence.
+
+- ~~**What is the background job's no-show/reschedule heuristic?**~~
+  **Resolved** — put to the user rather than invented
+  (`ai-workflow-rules.md` -> Handling Missing Requirements), since
+  reminders are one-way SES email and there is no confirmation channel a
+  "did they mean to come?" signal could be read from. Three answers: (a)
+  the signal is a patient's own count of past `no_show` appointments at
+  this clinic — the only signal actually available; (b) a flagged
+  appointment is escalated to staff outright, **not** auto-rescheduled,
+  so `project-overview.md`'s middle option is deliberately unimplemented
+  and `architecture.md` -> Invariants #6 holds by construction; (c) one
+  reminder, sent once, for anything starting within 24 hours of the scan
+  running. Implemented in `tools/automation.py`
+  (`NO_SHOW_RISK_THRESHOLD = 1`, flagged as a boundary decision rather
+  than a product rule, the same way `escalations.DEFAULT_ESCALATION_LIMIT`
+  is). See Completed.
 
 - **Can a patient ask what they already have booked?**
   `project-overview.md` lists check availability, book, reschedule,
