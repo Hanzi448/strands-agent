@@ -54,6 +54,8 @@ def main() -> None:
         app,
         config.stack_name("api"),
         description="ClinicPilot API: staff dashboard API, voice bridge, and Cognito.",
+        appointments_table=data.appointments_table,
+        escalations_table=data.escalations_table,
         **common,
     )
 

@@ -79,6 +79,16 @@ Update this file after every meaningful implementation change.
   claim scoping, and the `{data, error}` response shape
   `code-standards.md` requires. What is left of Next Up #2 is
   infrastructure and UI, not Python — see Next Up and Completed.
+- **The dashboard's CDK half has landed too.** `api_stack.py` now
+  provisions the staff Cognito user pool (with its `custom:clinic_id`
+  custom attribute, self-sign-up off), a REST API Gateway with the four
+  routes `dashboard_api._ROUTES` already fixed, each behind a Cognito
+  authorizer, and the Lambda running `dashboard_api.handler` with an
+  execution role scoped to exactly the `Appointments`/`Escalations`
+  calls it makes. `cdk synth` verifies it alone and as part of all five
+  stacks. What is left of Next Up #2 is UI only
+  (`frontend/src/dashboard/`) plus the unrelated guest-identity Cognito
+  identity pool the voice endpoint still needs — see Next Up.
 
 ## Current Goal
 
@@ -106,13 +116,14 @@ Update this file after every meaningful implementation change.
   directly. The background job, including its CDK half, is now entirely
   done (see Completed) — its own remaining step is the same blocked
   deploy as Next Up #1's. The staff dashboard's Python half (the new
-  clinic-wide appointment read, and `dashboard_api.py`'s four routes) is
-  now done too (see Completed); what is left of it is `api_stack.py`
-  (API Gateway, the Cognito user pool, and its `custom:clinic_id` custom
-  attribute) and `frontend/src/dashboard/`, split apart per
-  `ai-workflow-rules.md` -> When to Split Work (infra and frontend are
-  each their own step, and neither is Python). Next up: AgentCore
-  deploy, the dashboard's CDK and UI, and the seed scripts.
+  clinic-wide appointment read, and `dashboard_api.py`'s four routes)
+  and its CDK half (`api_stack.py`'s Cognito user pool, API Gateway, and
+  Lambda) are both done now too (see Completed); what is left of it is
+  `frontend/src/dashboard/` and the separate patient-facing guest
+  identity pool, split apart per `ai-workflow-rules.md` -> When to Split
+  Work (infra and frontend are each their own step, and neither is
+  Python). Next up: AgentCore deploy, the dashboard's UI, and the seed
+  scripts (which now also creates the two staff Cognito accounts).
 
 ## Completed
 
@@ -1573,6 +1584,74 @@ Update this file after every meaningful implementation change.
   these route paths and the `custom:clinic_id` attribute into actual AWS
   resources.
 
+- **`api_stack.py`: the Cognito user pool, REST API, and dashboard
+  Lambda** (Next Up #2a, the CDK half of the staff dashboard). The same
+  "code first, deploy second" split `agent_stack.py`'s AgentCore Runtime
+  and `automation_stack.py`'s background scan already went through
+  (`ai-workflow-rules.md` -> When to Split Work); `dashboard_api.py`'s
+  four routes were already done and tested (see the entry above), so
+  this unit only wires them into real resources.
+  **The four API Gateway resources are the literal contract
+  `dashboard_api._ROUTES` already fixed**, not invented here: `GET
+  /appointments`, `GET /escalations`, `GET /escalations/{escalation_id}`,
+  `POST /escalations/{escalation_id}/resolve`, each an explicit
+  `Resource`/`Method` rather than one `{proxy+}` catch-all
+  (`code-standards.md` -> AWS CDK: every route defined in CDK), each
+  behind a `CognitoUserPoolsAuthorizer` on the one staff user pool.
+  **The `clinic_id` custom attribute is declared, not seeded.** The user
+  pool carries a `clinic_id` custom attribute (`CLINIC_ID_ATTRIBUTE`,
+  read back by `dashboard_api._clinic_id_from` as `custom:clinic_id` —
+  Cognito's own prefix, added once and read once) with self-sign-up and
+  password recovery both off, since the only two accounts this pool will
+  ever hold are the demo clinics' own. **Creating those two accounts is
+  Next Up #3, not this unit** — a decision recorded in Architecture
+  Decisions below before this stack was written, because a CDK-managed
+  Cognito user needs a password strategy that is not a resource-naming
+  decision, and the seed script that already writes sample appointments
+  is the natural place for the `admin-create-user` /
+  `admin-set-user-password` calls instead.
+  **The Lambda is packaged exactly like `automation_stack.py`'s
+  background-scan function**: `backend/`'s own `lambda/` and `tools/`
+  directories only, running `lambda.dashboard_api.handler` — the same
+  reasoning (`boto3` plus the standard library needs no bundling step)
+  and the same asset excludes.
+  **The execution role is scoped to exactly what `dashboard_api.py`'s
+  four routes call**, verified against `tools/appointments.py` and
+  `tools/escalations.py` rather than assumed: `Query` on `Appointments`'
+  `by-start-time` index for `list_appointments_for_clinic`; `Query` on
+  `Escalations`' `by-created-at` index, `GetItem`, and `UpdateItem` for
+  `list_open_escalations`/`get_escalation`/`resolve_escalation`. No grant
+  onto `Clinics` or `Patients` — this Lambda's own imports never touch
+  either table.
+  **CORS is wide open** (`default_cors_preflight_options`, all
+  origins/methods) because `frontend_stack.py` is still a skeleton with
+  no CloudFront domain to narrow it to yet — an engineering default for
+  an unbuilt frontend, not a product decision, and one line to tighten
+  once Next Up #2b exists.
+  `app.py` now threads `data.appointments_table` and
+  `data.escalations_table` into `ApiStack` (it previously took no table
+  arguments, since it had no resources yet) — `Clinics` and `Patients`
+  are deliberately not passed, mirroring the grant list above.
+  Verified: `cdk synth` for `ClinicPilot-Dev-Api` alone, and
+  `cdk synth --all` for all five stacks, both exit 0 with no code
+  changes needed elsewhere; `cdk list` still shows all five stack names.
+  The synthesised template carries the user pool with its custom
+  attribute, the app client, the four `AWS::ApiGateway::Method` resources
+  each with `AuthorizationType: COGNITO_USER_POOLS` and the shared
+  authorizer, the Lambda with its handler string and environment
+  variables, and the two scoped `AWS::IAM::Policy` statements (no `*`
+  resource, per `code-standards.md`). The two pre-existing
+  `TableGrantsProps` deprecation warnings in the synth output were
+  confirmed present on `ClinicPilot-Dev-Data` alone on the pre-change
+  tree (via `git stash`), so they predate this unit and are not
+  addressed here — out of scope for a `data_stack.py` change this item
+  never touches.
+  **Not verified, and cannot be yet**: an actual `cdk deploy`, a real
+  Cognito token reaching API Gateway, and a real login — all blocked in
+  this environment for the same reason Next Up #1 is (see Session
+  Notes), and all still waiting on Next Up #3's seed script for the two
+  demo accounts this pool is built to hold.
+
 ## In Progress
 
 - None.
@@ -1622,21 +1701,26 @@ content, not agent code.
 2. Build the staff dashboard. Its Python half is done (see Completed):
    `tools/appointments.list_appointments_for_clinic` plus
    `lambda/dashboard_api.py`'s four routes over it and the three
-   existing escalation reads/write. What remains is two separate steps
-   (`ai-workflow-rules.md` -> When to Split Work):
-   a. `api_stack.py` — the Cognito user pool (one demo account per
-      clinic, each carrying `custom:clinic_id` as documented in
-      `architecture.md` -> Auth and Access Model), the REST API Gateway
-      wired to `dashboard_api.py` with a Cognito authorizer, and the
-      four routes' resource paths (`/appointments`,
-      `/escalations`, `/escalations/{escalation_id}`,
-      `/escalations/{escalation_id}/resolve`) as `dashboard_api.py`
-      itself expects them.
-   b. `frontend/src/dashboard/` — the Cognito login, appointment list
+   existing escalation reads/write. Its CDK half (2a) is now done too
+   (see Completed): `api_stack.py` provisions the staff Cognito user
+   pool with its `custom:clinic_id` custom attribute, the REST API
+   Gateway's four routes behind a Cognito authorizer, and the Lambda
+   plus its scoped IAM role, all verified via `cdk synth`. What remains
+   is:
+   a. `frontend/src/dashboard/` — the Cognito login, appointment list
       and escalation queue UI `ui-context.md` -> Layout Patterns
-      describes, once (a) exists to call.
+      describes, now that a real API exists to call once deployed.
+   b. The guest-identity Cognito **identity pool** for the patient-facing
+      voice endpoint (`architecture.md` -> Auth and Access Model) is a
+      separate, still-open piece — unrelated to the staff user pool just
+      built, and not yet assigned a stack (candidates are `api_stack.py`
+      or `frontend_stack.py`, per the note on Next Up #1 above). Not
+      started.
 3. Seed the two demo clinics (dental, cosmetic) with config,
-   sample appointments, and FAQ documents for the Knowledge Base.
+   sample appointments, the two staff Cognito accounts (`api_stack.py`'s
+   user pool now exists to hold them — `admin-create-user` /
+   `admin-set-user-password`, each with its `custom:clinic_id` set), and
+   FAQ documents for the Knowledge Base.
    Settle the phone-number country-code question below first: this is
    the step that fixes a number format. Also what will let
    `NO_SHOW_RISK_THRESHOLD` (`tools/automation.py`) be judged against real
@@ -2257,6 +2341,37 @@ content, not agent code.
   `resource` (API Gateway's route *template*, e.g.
   `/escalations/{escalation_id}`) keeps the table's size fixed rather
   than growing with every id ever requested.
+
+- **Creating the two demo Cognito accounts is a seed-script job, not a
+  CDK one.** `api_stack.py`'s user pool declares the `clinic_id` custom
+  attribute and turns off self-sign-up and password recovery, but
+  provisions no users. A CDK-managed Cognito user (`CfnUserPoolUser`)
+  needs a password strategy — a temporary password, force-change flow,
+  or a custom resource calling `admin-set-user-password` — that is a
+  credential decision, not a resource-naming one, and Next Up #3's seed
+  script already scripts `boto3` calls for sample data; adding
+  `admin-create-user`/`admin-set-user-password` there for both demo
+  clinics is one script owning every piece of demo-account setup instead
+  of splitting it between CDK and a script.
+
+- **The staff user pool and the patient-facing guest identity pool are
+  two different things, deliberately kept apart.** `api_stack.py` built
+  in this unit is the *staff* pool only — Cognito **user pool**
+  authentication, one demo account per clinic, gating the dashboard API.
+  The **identity pool** with unauthenticated (guest) identities
+  (`architecture.md` -> Auth and Access Model) is what an anonymous
+  browser needs to presign the AgentCore WebSocket, and remains entirely
+  unbuilt — a separate credential path on purpose
+  (`architecture.md` -> Invariants #5: staff auth must not share a path
+  with anonymous visitors), so it is not a sub-item of this unit and is
+  still open in Next Up.
+
+- **CORS on the dashboard API is wide open for now, not scoped to a
+  domain.** `frontend_stack.py` has no CloudFront distribution yet, so
+  there is no origin to allowlist. `default_cors_preflight_options` on
+  the whole API accepts every origin/method — an engineering default for
+  an unbuilt frontend, not a product decision, and the fix is one
+  parameter change once Next Up #2's UI item picks a domain.
 
 ## Session Notes
 
