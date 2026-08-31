@@ -112,6 +112,15 @@ Update this file after every meaningful implementation change.
   builds and nothing else. `cdk synth` verifies it alone and as part of
   all five stacks. Nothing left in `progress-tracker.md` -> Next Up is
   dashboard work.
+- **`seed/` now exists, and with it the code half of Next Up #2.**
+  `clinic_data.py`, `sample_data.py`, `faq_content.py`, `aws_io.py`, and
+  `run_seed.py` seed the two demo `Clinics` items, six sample
+  appointments (through the real `check_availability`/`book_appointment`
+  path, never a hand-built item), three FAQ documents per clinic, and the
+  two staff Cognito accounts. `python -m seed.run_seed --dry-run` runs
+  today, in this environment, touching no AWS client; the real run is
+  blocked the same way Next Up #1's `cdk deploy` is (Session Notes). See
+  Completed.
 
 ## Current Goal
 
@@ -143,8 +152,13 @@ Update this file after every meaningful implementation change.
   pool, API Gateway, Lambda), UI (`frontend/src/dashboard/`), and now the
   patient-facing guest-identity Cognito pool too — is entirely done (see
   Completed); nothing dashboard-shaped remains in Next Up.
-  Next up: AgentCore deploy and the seed scripts (which now also creates
-  the two staff Cognito accounts) — see Next Up.
+  The seed scripts' code (config, sample appointments, FAQ documents, and
+  the two staff Cognito accounts) is now done too (see Completed) —
+  `seed/` is written, offline-tested, and runnable in `--dry-run`. What
+  remains of Phase 3 is no longer code anywhere in this repo: it is
+  Next Up #1's `cdk deploy` and then `python -m seed.run_seed` for real,
+  both blocked in this environment for the same reason (Session Notes) —
+  see Next Up.
 
 ## Completed
 
@@ -1884,6 +1898,121 @@ Update this file after every meaningful implementation change.
   fixes the number *format* the seed scripts need to agree on; writing
   them is the rest of Next Up #2.
 
+- **`seed/`: the code half of seeding the two demo clinics** (Next Up
+  #2, code half — superseded by the split recorded above). Five modules
+  plus a 43-test suite: `clinic_data.py` (the two `Clinics` items —
+  Bright Smile Dental and Lumiere Aesthetics, the exact shapes
+  `architecture.md` -> Storage Model and `test_scheduling.py`'s fixtures
+  already fixed, now both carrying `country_code: "44"` since that
+  attribute exists), `sample_data.py` (specs for six sample appointments,
+  three per clinic), `faq_content.py` (three FAQ documents per clinic —
+  pricing, preparation, policies, `project-overview.md`'s own list),
+  `aws_io.py` (the S3 / Bedrock Agent / Cognito calls beyond
+  `tools.dynamo`), and `run_seed.py` (the CLI tying them together).
+  `seed/` sits outside `backend/` (`architecture.md` -> System
+  Boundaries already named it top-level), so `seed/__init__.py` adds
+  `backend/` to `sys.path` once on import, and `backend/pytest.ini`
+  gained a second `pythonpath` entry (the repository root) so
+  `backend/tests/test_seed_*.py` still runs from the one existing suite
+  and venv rather than a third one.
+  **Every write goes through the layer that already has the rule.**
+  `seed_sample_appointments` calls `tools.scheduling.check_availability`
+  then `tools.booking.book_appointment` for each spec — it never composes
+  an `Appointments` item by hand — so a seeded appointment cannot be a
+  shape the live agent could not have produced itself
+  (`architecture.md` -> Invariants #3's spirit, applied to a script). No
+  tool function creates a `Clinics` row (a clinic's config is fixed data,
+  never agent-created), so `seed_clinics` is the one place in this
+  package that writes DynamoDB directly, through
+  `tools.dynamo.clinics_table`.
+  **Every AWS client is reached through an accessor, monkeypatchable the
+  same way `clinics_table()` already is** — `aws_io.s3_client()`,
+  `.bedrock_agent_client()`, `.cognito_client()`, each `lru_cache`d and
+  lazily importing `boto3` — rather than passed in as a parameter. A
+  first draft of this unit took the client as an argument instead
+  (mirroring `tools.automation._send_reminder_email`'s shape); rewritten
+  to match `tools.scheduling`/`tools.booking`'s accessor-function shape
+  once the inconsistency was noticed, since that is the pattern the rest
+  of this codebase's tests already monkeypatch.
+  **Three names are duplicated from `backend/infra/`, guarded the same
+  way `test_schema_matches_infra.py` already guards the other two**:
+  `aws_io.KB_BUCKET_PREFIX`/`kb_source_prefix` against `data_stack.py`'s;
+  `aws_io.kb_bucket_name()`'s derived default against
+  `config.resource_name("kb")`. The Cognito `custom:clinic_id` attribute
+  name is deliberately *not* a third copy — `ensure_staff_account` reads
+  `dashboard_api.CLINIC_ID_CLAIM` via the same `importlib.import_module`
+  route `test_background_scan.py` already uses for the `lambda` package,
+  since `lambda` is a Python keyword.
+  **Two ids cannot be derived and are required, not defaulted**: the
+  staff user pool id (`$CLINICPILOT_STAFF_USER_POOL_ID`, from
+  `api_stack.py`'s `StaffUserPoolId` output — Cognito assigns it, no
+  naming scheme predicts it) and the demo password
+  (`$CLINICPILOT_STAFF_DEMO_PASSWORD` — never hardcoded, since a password
+  in source is a password in version control). Each clinic's Knowledge
+  Base id is read the same way `tools.faq.query_faq` will read it at call
+  time (`tools.faq.knowledge_base_id_env_var`), so seeding and querying
+  can never disagree about which environment variable to check.
+  **`ensure_staff_account` is idempotent on purpose**: an existing
+  account's password and `custom:clinic_id` are left untouched, so a
+  staff member who changed their password at the demo does not have it
+  silently reset by a second seed run. `seed_clinics` is idempotent for
+  the ordinary reason (`put_item` overwrites); `seed_sample_appointments`
+  is not, and its own docstring says so — it is meant to run once against
+  a freshly deployed, empty environment.
+  **A real ingestion job is triggered, not assumed.** `agent_stack.py`
+  wires an S3 data source with no auto-sync trigger, so
+  `start_kb_ingestion` looks up the clinic's one data source
+  (`list_data_sources`) and starts it after `upload_faq_documents` writes
+  under that clinic's `kb/{clinic_id}/` prefix — otherwise the uploaded
+  documents would sit in S3, invisible to `query_faq`, until someone
+  noticed.
+  **`run_seed.main` keeps going past a failed step.** Its four steps
+  (clinics, appointments, faq, staff) are independent enough that one
+  failing — most likely faq, before a Knowledge Base id is set — should
+  not stop the others from seeding; every exception is caught, not just
+  `tools.errors.ToolError`, since a step can just as easily fail on a
+  botocore credentials/region error, the same distinction
+  `agents/cli.py`'s `main` already draws. `--dry-run` prints what every
+  requested step would do and calls no AWS client at all — pinned by a
+  test that makes every client accessor raise if called — which is the
+  only mode this environment can actually run (see Session Notes);
+  `--skip STEP` (repeatable) leaves one out.
+  **A real gap surfaced and was deliberately routed around, not fixed
+  here**: `validation.normalise_phone`'s `country_code` reconciliation
+  only *prepends* the code when no international marker is present — it
+  does not strip a national trunk prefix first, so a UK number's natural
+  national form (`"07700 900002"`) would prepend to `"4407700…"` while
+  its international form produces `"447700…"`, and the two would not
+  converge. `sample_data.py`'s two "national form" sample numbers write
+  the number without the leading trunk `0` instead, documented inline as
+  a deliberate workaround rather than a demonstration that reconciliation
+  works for every country's dialling plan. Not fixed here —
+  `tools/validation.py` is a foundational module several other tools
+  import, and fixing it is a separate, scoped change
+  (`ai-workflow-rules.md` -> When to Split Work) — see Open Questions.
+  Verified: `pytest` from `backend/` — **773 passed** (730 before, 43
+  new), the pre-existing 730 unchanged. Offline throughout: `clinic_data`
+  is fed through the real `tools.scheduling.check_availability` against a
+  fake table (not just shape-asserted) so a config that merely *looks*
+  right cannot pass; `seed_sample_appointments` is driven end to end
+  through the real `scheduling`/`booking`/`patients` functions against
+  the same fakes `test_booking.py`'s `tables` fixture uses, booking all
+  six sample specs for both clinics against a fixed reference date so the
+  suite does not depend on which day it happens to run; `aws_io`'s S3,
+  Bedrock Agent, and Cognito calls are each exercised against a
+  hand-rolled fake client, including the "already exists" Cognito path
+  and the "no data source configured" ingestion failure. Also run for
+  real from the repository root: `python -m seed.run_seed --dry-run`
+  (prints every step's plan, confirmed no AWS client is constructed) and
+  the real steps against an unconfigured shell, which produced the same
+  `NoRegionError`, named and exit code 1, `agents/cli.py` already
+  produces for the same reason.
+  **Not verified, and cannot be yet, in this environment**: an actual
+  seed run against deployed tables/bucket/pool/Knowledge Bases. No AWS
+  credentials are usable here — see Session Notes — so this needs the
+  same `cdk deploy` Next Up #1 does, plus the pool id, password, and
+  per-clinic Knowledge Base ids that deploy's outputs provide.
+
 ## In Progress
 
 - None.
@@ -1935,6 +2064,17 @@ empty skeleton. The guest role gets exactly one grant,
 Bedrock-model access, per `architecture.md` -> Invariants #5. All four
 are in Completed below; the numbered list is renumbered accordingly.
 
+The old #2 ("Seed the two demo clinics with config, sample appointments,
+staff Cognito accounts, and FAQ documents") has now had the same
+code/deploy split applied to it that Next Up #1 already had
+(`ai-workflow-rules.md` -> When to Split Work): `seed/` — `clinic_data.py`,
+`sample_data.py`, `faq_content.py`, `aws_io.py`, `run_seed.py` — is
+written, offline-tested, and runnable (`--dry-run` proves it end to end
+with no AWS client touched at all); what remains is running it for real,
+which needs the same credentials and deployed stacks Next Up #1's actual
+`cdk deploy` does. See Completed. The numbered list is renumbered
+accordingly.
+
 1. Deploy `agentcore_app.py` to the AgentCore Runtime `agent_stack.py`
    now defines, then verify one voice session end-to-end. Both the
    Python side and the CDK side are done (see Completed) — this item is
@@ -1948,23 +2088,18 @@ are in Completed below; the numbered list is renumbered accordingly.
    **Blocked in this environment specifically**: see Session Notes — no
    Docker and no AWS credentials are usable here for anything beyond
    local, offline work, so this item needs a session (or a person) that
-   actually has both.
-2. Seed the two demo clinics (dental, cosmetic) with config,
-   sample appointments, the two staff Cognito accounts (`api_stack.py`'s
-   user pool now exists to hold them — `admin-create-user` /
-   `admin-set-user-password`, each with its `custom:clinic_id` set), and
-   FAQ documents for the Knowledge Base.
-   The phone-number country-code question that blocked this is now
-   resolved and implemented (see Completed): `Clinics` takes an optional
-   `country_code`, so the seed scripts have a fixed number format to write
-   — a UK-based demo clinic seeds `country_code: "44"` and can write its
-   sample phone numbers in either form. Also what will let
-   `NO_SHOW_RISK_THRESHOLD` (`tools/automation.py`) be judged against real
-   data rather than argued about. Also what a verified SES sender
-   identity needs to exist for, so `CLINICPILOT_REMINDER_SENDER_EMAIL`
-   can finally be set on the background scan Lambda's environment
-   (`automation_stack.py`, Next Up's old #2) — see Session Notes.
-3. Architecture diagram, README, demo video, submission assets.
+   actually has both. The same is now true of running `seed/run_seed.py`
+   for real (its code is done — see Completed): it needs the five stacks
+   deployed and `$CLINICPILOT_STAFF_USER_POOL_ID` /
+   `$CLINICPILOT_STAFF_DEMO_PASSWORD` / one `$CLINICPILOT_KB_ID_...` per
+   clinic from those stacks' outputs, none of which exist until #1's
+   `cdk deploy` runs somewhere with Docker and credentials. Also what
+   will let `NO_SHOW_RISK_THRESHOLD` (`tools/automation.py`) be judged
+   against real data rather than argued about, and what a verified SES
+   sender identity needs to exist for, so
+   `CLINICPILOT_REMINDER_SENDER_EMAIL` can finally be set on the
+   background scan Lambda's environment (`automation_stack.py`).
+2. Architecture diagram, README, demo video, submission assets.
 
 ## Open Questions
 
@@ -2290,6 +2425,32 @@ are in Completed below; the numbered list is renumbered accordingly.
   runtime and nothing else — no direct DynamoDB, S3, or Bedrock
   access on that role, ever. The identity pool stays separate from
   the staff user pool.
+
+- **`validation.normalise_phone`'s `country_code` reconciliation does
+  not handle a national trunk prefix.** Surfaced while writing `seed/`'s
+  sample data (`ai-workflow-rules.md` -> Handling Missing Requirements),
+  not by a test failure: the function only *prepends* `country_code` when
+  no `+`/`00` marker is present, so a UK number written the way a caller
+  would naturally say it nationally — `"07700 900002"`, leading trunk
+  `0` — prepends to `"4407700900002"`, while the same number's
+  international form (`"+44 7700 900002"`) normalises to
+  `"447700900002"`. The two do not converge, which defeats the whole
+  point of `country_code` for exactly the numbers most likely to exercise
+  it: most dialling plans outside the US (UK, and most of Europe,
+  Australia, and elsewhere) use a trunk prefix like this one, dropped
+  when the country code is added and present otherwise. `seed/sample_data.py`
+  routes around it — its "national form" sample numbers omit the leading
+  `0` rather than demonstrate a reconciliation that would silently fail
+  — but the underlying gap is still live for a real UK caller speaking
+  their number the ordinary way. Not fixed in the `seed/` unit that found
+  it: `tools/validation.py` is foundational (imported by `patients.py`,
+  `booking.py`, `appointments.py`, and their test suites), so a fix is
+  its own scoped unit, not something to fold into a seed script
+  (`ai-workflow-rules.md` -> When to Split Work). Needs a decision, not
+  just a fix: whether to strip a single leading `0` unconditionally when
+  `country_code` is set (simple, but wrong for the handful of countries
+  whose national numbers can legitimately start with `0` after the trunk
+  digit is removed) or something more deliberate.
 
 ## Architecture Decisions
 

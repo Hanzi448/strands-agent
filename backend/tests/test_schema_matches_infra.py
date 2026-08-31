@@ -26,6 +26,8 @@ import pytest
 
 from tools import dynamo, faq, schema
 
+from seed import aws_io
+
 INFRA_DIR = Path(__file__).resolve().parents[1] / "infra"
 DATA_STACK_PATH = INFRA_DIR / "data_stack.py"
 AGENT_STACK_PATH = INFRA_DIR / "agent_stack.py"
@@ -137,3 +139,30 @@ def test_kb_id_env_prefix_matches_the_agent_stack() -> None:
         f"{AGENT_STACK_PATH.name}: {faq.KB_ID_ENV_PREFIX!r} vs "
         f"{agent_stack_constants['KB_ID_ENV_PREFIX']!r}."
     )
+
+
+def test_kb_bucket_prefix_matches_the_data_stack() -> None:
+    """`seed/aws_io.py` duplicates `data_stack.py`'s `KB_BUCKET_PREFIX` for
+    the same reason this file's other tests exist: `seed/` cannot import
+    `aws_cdk` either. A drift here would upload FAQ documents to a prefix
+    no clinic's Bedrock data source is actually watching.
+    """
+    data_stack_constants = _module_level_strings(DATA_STACK_PATH)
+    assert data_stack_constants["KB_BUCKET_PREFIX"] == aws_io.KB_BUCKET_PREFIX, (
+        "KB_BUCKET_PREFIX disagrees between seed/aws_io.py and "
+        f"{DATA_STACK_PATH.name}: {aws_io.KB_BUCKET_PREFIX!r} vs "
+        f"{data_stack_constants['KB_BUCKET_PREFIX']!r}."
+    )
+
+
+def test_kb_bucket_name_matches_the_cdk_naming_scheme(monkeypatch) -> None:
+    """`aws_io.kb_bucket_name`'s derived default must match what
+    `backend/infra/config.py`'s `resource_name("kb")` physically deploys,
+    the same property `test_table_names_match_the_cdk_naming_scheme`
+    checks for the four tables.
+    """
+    for env_var in (aws_io.KB_BUCKET_ENV, aws_io._PROJECT_PREFIX_ENV, aws_io._ENVIRONMENT_ENV):
+        monkeypatch.delenv(env_var, raising=False)
+
+    config = _load_infra_config().ProjectConfig()
+    assert aws_io.kb_bucket_name() == config.resource_name("kb")
