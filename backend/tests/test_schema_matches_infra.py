@@ -24,10 +24,11 @@ from types import ModuleType
 
 import pytest
 
-from tools import dynamo, schema
+from tools import dynamo, faq, schema
 
 INFRA_DIR = Path(__file__).resolve().parents[1] / "infra"
 DATA_STACK_PATH = INFRA_DIR / "data_stack.py"
+AGENT_STACK_PATH = INFRA_DIR / "agent_stack.py"
 CONFIG_PATH = INFRA_DIR / "config.py"
 
 # Constants that carry the same name on both sides. Anything DynamoDB
@@ -116,3 +117,23 @@ def test_naming_defaults_match_the_cdk_config() -> None:
     config_module = _load_infra_config()
     assert dynamo.DEFAULT_PROJECT_PREFIX == config_module.DEFAULT_PROJECT_PREFIX
     assert dynamo.DEFAULT_ENVIRONMENT == config_module.DEFAULT_ENVIRONMENT
+
+
+def test_kb_id_env_prefix_matches_the_agent_stack() -> None:
+    """`agent_stack.py` duplicates `faq.KB_ID_ENV_PREFIX` for the reason
+    `data_stack.py` duplicates the key/index names: it needs `aws-cdk-lib`,
+    which `tools/faq.py` must never depend on. A drift here would mean the
+    runtime's environment variable and `knowledge_base_id_env_var`'s lookup
+    disagree silently -- every clinic's FAQ tool would fail closed with
+    "no Knowledge Base configured" against a real deploy.
+    """
+    agent_stack_constants = _module_level_strings(AGENT_STACK_PATH)
+    assert "KB_ID_ENV_PREFIX" in agent_stack_constants, (
+        f"KB_ID_ENV_PREFIX is defined in tools/faq.py but no longer in "
+        f"{AGENT_STACK_PATH.name}."
+    )
+    assert agent_stack_constants["KB_ID_ENV_PREFIX"] == faq.KB_ID_ENV_PREFIX, (
+        "KB_ID_ENV_PREFIX disagrees between tools/faq.py and "
+        f"{AGENT_STACK_PATH.name}: {faq.KB_ID_ENV_PREFIX!r} vs "
+        f"{agent_stack_constants['KB_ID_ENV_PREFIX']!r}."
+    )

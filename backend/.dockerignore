@@ -1,0 +1,11 @@
+# Keeps the build context small and keeps CDK/dev-only/test code out of
+# the image `backend/agent_stack.py` builds via `AgentRuntimeArtifact.from_asset`.
+.venv/
+infra/
+tests/
+__pycache__/
+*.pyc
+.pytest_cache/
+requirements-dev.txt
+pytest.ini
+.git/

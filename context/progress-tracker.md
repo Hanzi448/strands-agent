@@ -41,10 +41,17 @@ Update this file after every meaningful implementation change.
 - **The deployed entrypoint's code now exists too.**
   `backend/agents/agentcore_app.py` is a FastAPI `/ping` + `/ws` shaped
   like the vendored sample's `agent/strands_agent.py`, verified offline
-  through FastAPI's own ASGI test client. What is left of Next Up #1 is
-  no longer code: it is `agent_stack.py`'s CDK resources, a Dockerfile,
-  a container build, and a real Bedrock connection — none of which this
-  environment can do right now (Session Notes).
+  through FastAPI's own ASGI test client.
+- **`agent_stack.py` now provisions the AgentCore Runtime too, and
+  `backend/Dockerfile` exists.** `cdk synth` needs neither Docker nor AWS
+  credentials for this (the container image is an ordinary CDK asset,
+  fingerprinted at synth time and only built/pushed during `cdk deploy`),
+  so this closed the code-and-infra half of Next Up #1 that this
+  environment *could* do. What is left of Next Up #1 is no longer code:
+  it is the actual `cdk deploy` (a container build/push this environment
+  cannot do without Docker, and stack creation it cannot do without
+  credentials) and a real Bedrock connection to listen to — see Session
+  Notes.
 - **Still nothing here has met a real model.** Both interfaces exist and
   run, but running either for real needs credentials and seeded clinics
   (Next Up #5); against an unconfigured shell they fail as designed, on
@@ -60,9 +67,11 @@ Update this file after every meaningful implementation change.
   keyboard, `python -m agents.mic <clinic-id>` from a microphone, and
   (once deployed) `agents.agentcore_app:app`'s `/ws` from a browser.
   All of Phase 3's code is now written; both remaining items are
-  infrastructure and data, not agent logic. Next Up #1 needs
-  **provisioning and deploying it** (CDK resources, a Dockerfile, a
-  container build) and **pointing any interface at something real**
+  infrastructure and data, not agent logic. Next Up #1's CDK resources
+  and Dockerfile are now written too (see Completed); what is left is
+  **actually deploying it** (a container build/push and real stack
+  creation, both blocked in this environment -- Session Notes) and
+  **pointing any interface at something real**
   (credentials plus seeded clinics, #5). That second one is the
   bottleneck for three open questions at once — who greets the patient
   and what it costs in dead air, which voice each clinic answers in,
@@ -1149,6 +1158,115 @@ Update this file after every meaningful implementation change.
   session (Next Up #1 and #4) — the same gap `query_faq`'s own entry
   already named.
 
+- **`agent_stack.py`'s remaining CDK resources, plus `backend/Dockerfile`**
+  (Next Up #1, second half — the code-and-infra half of it this
+  environment could actually do). `agentcore_app.py`'s own Completed
+  entry split "deploy to AgentCore Runtime" into a code half (done) and
+  an infra half; this unit is that infra half, minus the one piece no
+  offline environment can do at all (the real `cdk deploy`).
+  **The container image is an ordinary CDK asset, not the vendored
+  sample's CodeBuild pipeline.** `vendor/.../cdk/lib/runtime-stack.ts`
+  uploads agent source to S3 and triggers a CodeBuild project to build
+  and push the image, with a custom-resource Lambda to wait for it — a
+  real workaround, but for a problem this build does not have: it exists
+  so the machine running `cdk deploy` never needs Docker itself. This
+  stack uses `AgentRuntimeArtifact.from_asset("backend/", file="Dockerfile")`
+  instead, CDK's standard container-asset path: the image is
+  fingerprinted from the source tree at `cdk synth` time (no Docker, no
+  credentials needed for that) and only actually built and pushed during
+  `cdk deploy`'s own asset-publishing step. Simpler, and
+  `code-standards.md` -> General's "fix root causes, do not layer
+  workarounds" is the reason it was not copied anyway once it turned out
+  not to be needed.
+  **`backend/Dockerfile` drops the PyAudio/PortAudio layer**, exactly as
+  `progress-tracker.md` already flagged when `agentcore_app.py` landed:
+  this container never opens a sound device, and `requirements.txt`
+  installs `strands-agents[bidi]`, not `[bidi-pyaudio]`. ARM64 platform
+  and port 8080 are kept from the vendored sample's Dockerfile —
+  AgentCore Runtime requires both, and nothing here is free to change
+  them. `.dockerignore` keeps `infra/`, `tests/`, and the dev-only
+  `requirements-dev.txt` out of the build context and, so, out of the
+  asset hash.
+  **The execution role is the L2 `Runtime` construct's own auto-created
+  role, not a hand-built one** — unlike `_build_clinic_knowledge_base`'s
+  ingestion role, which has no construct to auto-create it. This stack
+  only *adds* the grants that role does not get for free: `GetItem` on
+  `Clinics`; `Query` + `PutItem` + `UpdateItem` on `Patients` and
+  `Appointments` (their GSIs included); `PutItem`-only on `Escalations`,
+  because the only tool this runtime's agents expose is
+  `create_escalation` — `list_open_escalations`, `get_escalation`, and
+  `resolve_escalation` are staff-dashboard reads that belong to a Lambda
+  role in `api_stack.py`, not to this one. Every action list was checked
+  against the actual `boto3` calls in `tools/scheduling.py`,
+  `tools/patients.py`, `tools/booking.py`, `tools/appointments.py`, and
+  `tools/escalations.py` (grep'd, not assumed), and `bedrock:Retrieve` is
+  granted per clinic, scoped to that clinic's own Knowledge Base ARN and
+  no other's (`architecture.md` -> Invariants #1).
+  **Bedrock model invocation is scoped to the `foundation-model` resource
+  type, not to one model id.** Which text model the sub-agents reason
+  with, and Nova Sonic's own model id, are both still open questions
+  below, threaded through a `model` argument this stack has no way to
+  read — pinning an ARN now would silently break the moment either
+  question is answered with a different id. Still not the blanket grant
+  `code-standards.md` -> AWS CDK forbids: scoped to one resource type, in
+  this account and region, and the trade-off is written into this
+  module's own docstring rather than left implicit.
+  **The runtime is public and IAM-authorized, matching
+  `architecture.md` -> Auth and Access Model as already written**: network
+  mode `PUBLIC` (an AgentCore Runtime is not placed inside a VPC for this
+  build) and `RuntimeAuthorizerConfiguration.using_iam()` — SigV4, which
+  is exactly what a Cognito identity pool's guest credentials produce.
+  The identity pool and its guest IAM role (scoped to
+  `grant_invoke_runtime` on this resource and nothing else) are **not**
+  part of this unit: they belong beside Cognito in
+  `api_stack.py`/`frontend_stack.py`, which do not exist yet.
+  **`KB_ID_ENV_PREFIX` is duplicated from `tools/faq.py`, not imported** —
+  the same reason `data_stack.py` duplicates `schema.py`'s key and index
+  names rather than importing them: this stack needs `aws-cdk-lib`, which
+  `backend/tools/` must never depend on, and the two run in separate
+  virtual environments. A new guard,
+  `test_kb_id_env_prefix_matches_the_agent_stack` in
+  `test_schema_matches_infra.py`, fails if the two ever disagree — the
+  same drift-guard shape that file already used for the data stack.
+  **AgentCore Runtime names may not contain hyphens** (letters, digits,
+  underscores only — the vendored sample's own runtime is
+  `nova_sonic_bidi_agent` for the same reason), unlike every other
+  resource name `ProjectConfig.resource_name` builds. `_runtime_name`
+  is the one place that gets special-cased rather than changing the
+  naming scheme everything else uses.
+  Verified: `pytest` from `backend/` — **667 passed** (666 before, 1
+  new), the pre-existing 666 unchanged. `cdk synth` exits 0 with all five
+  templates still written, and the synthesised `ClinicPilot-Dev-Agent`
+  template was read back and checked directly (not assumed from the
+  code): one `AWS::BedrockAgentCore::Runtime` resource, correct
+  `AgentRuntimeName`/`ProtocolConfiguration: HTTP`/
+  `NetworkConfiguration: PUBLIC`, IAM auth (an absent
+  `AuthorizerConfiguration`, which is exactly what `using_iam()` produces
+  at the CloudFormation layer), both clinics' Knowledge Base ids wired as
+  environment variables via `Fn::GetAtt` tokens (not deploy-time
+  constants — they do not exist until this stack deploys), a `RoleArn`
+  pointing at the auto-created execution role, and a container URI built
+  from CDK's own bootstrap asset ECR repository with an unresolved-token
+  info note ("validated at deployment time") rather than a build attempt
+  — confirming Docker is genuinely not invoked at `synth` time. The
+  execution role's own policy was read back too: every added statement
+  present with the exact scoped resource expected (per-clinic KB ARNs,
+  `foundation-model/*`, each table's own ARN plus `/index/*` where
+  `Query` is granted, `Escalations` with `PutItem` alone), alongside the
+  framework's own baseline grants (CloudWatch Logs, X-Ray, the workload-
+  identity token calls, and pulling the image from the bootstrap ECR
+  repo) which this unit did not have to add and does not touch. A second
+  synth with `CLINICPILOT_ENV=prod` confirmed the naming branch
+  (`clinicpilot_prod_agent_runtime`) and its artifacts were removed
+  after, matching the verification style every other environment-branched
+  resource in this stack already got.
+  **Not verified, and cannot be yet, in this environment**: the actual
+  `cdk deploy` (needs Docker, to build and push the image, and AWS
+  credentials, to create the stack — neither available here, Session
+  Notes), and everything downstream of it: a real container running,
+  AgentCore actually invoking it, and a real voice session over the
+  deployed `/ws`.
+
 ## In Progress
 
 - None.
@@ -1158,15 +1276,17 @@ Update this file after every meaningful implementation change.
 Both halves of the old "drive the voice agent" item are in Completed:
 `voice.py` builds the speech agent and `mic.py` drives it from a
 microphone. The old "deploy to AgentCore Runtime" item has now had the
-same split applied to it (`ai-workflow-rules.md` -> When to Split Work:
-Python logic and its CDK deployment are separate steps) — the code half,
-`agents/agentcore_app.py`, is in Completed below. What remains of #1 is
-now purely infrastructure and a real call, and needs AWS resources that
-do not exist yet, which is why **#4 (seed) unblocks more than its
-position suggests**: it is what turns either interface, and soon the
-deployed one, from a program that runs into a call someone can listen
-to, and it is where the greeting, voice and text-model questions get
-answered.
+same split applied to it twice over (`ai-workflow-rules.md` -> When to
+Split Work: Python logic and its CDK deployment are separate steps): the
+code half, `agents/agentcore_app.py`, and the CDK-resources-plus-
+Dockerfile half, `agent_stack.py`'s AgentCore Runtime, are both in
+Completed below. What remains of #1 is now purely the deploy action
+itself — a `cdk deploy` needing Docker and AWS credentials this
+environment has neither of — and the real call that follows it, which is
+why **#4 (seed) unblocks more than its position suggests**: it is what
+turns either interface, and soon the deployed one, from a program that
+runs into a call someone can listen to, and it is where the greeting,
+voice and text-model questions get answered.
 
 The old #2 ("KB bucket plus the Bedrock Knowledge Base, `faq_agent.py`,
 and its Orchestrator wiring") has been completed in full, across three
@@ -1179,18 +1299,20 @@ Scheduling, FAQ and Escalation — is therefore finished; everything left
 in this list is infrastructure, background automation, dashboard, or
 content, not agent code.
 
-1. Provision AgentCore Runtime and deploy `agentcore_app.py` to it,
-   then verify one voice session end-to-end. The Python side is done
-   (see Completed) — this item is `agent_stack.py`'s remaining CDK
-   resources (AgentCore Runtime, its container build/push, its
-   execution role), containerising `backend/` (a Dockerfile is not
-   written yet — the vendored sample's `agent/Dockerfile` is the
-   reference shape, minus the PyAudio/PortAudio layer this path does not
-   need), and pointing a real browser or `websocat`-style client at the
-   deployed `/ws` with a seeded clinic behind it. **Blocked in this
-   environment specifically**: see Session Notes — no AWS credentials
-   are usable here for anything beyond local, offline work, so this item
-   needs a session (or a person) that actually has them.
+1. Deploy `agentcore_app.py` to the AgentCore Runtime `agent_stack.py`
+   now defines, then verify one voice session end-to-end. Both the
+   Python side and the CDK side are done (see Completed) — this item is
+   now purely `cdk deploy` (needs Docker, to build and push
+   `backend/Dockerfile`'s image, and AWS credentials, to create the
+   stack) plus pointing a real browser or `websocat`-style client at the
+   deployed `/ws` with a seeded clinic behind it, and provisioning the
+   guest-identity Cognito role a browser needs to invoke it
+   (`architecture.md` -> Auth and Access Model — belongs beside Cognito
+   in `api_stack.py`/`frontend_stack.py`, not in `agent_stack.py`).
+   **Blocked in this environment specifically**: see Session Notes — no
+   Docker and no AWS credentials are usable here for anything beyond
+   local, offline work, so this item needs a session (or a person) that
+   actually has both.
 2. Build the background Lambda + EventBridge schedule, reusing
    `backend/tools/` functions. Its no-show/reschedule heuristic is not
    specified anywhere yet — per `ai-workflow-rules.md` -> When to Split
@@ -1917,6 +2039,17 @@ content, not agent code.
   passed as `.venv\Scripts\python.exe app.py` when the venv is not
   activated. Recorded in `backend/infra/README.md` so it isn't
   rediscovered.
+- **`aws-cdk-lib` 2.266 ships real AgentCore Runtime constructs** —
+  `aws_cdk.aws_bedrockagentcore`, both an L1 (`CfnRuntime`) and an L2
+  (`Runtime`, with `AgentRuntimeArtifact.from_asset` building the
+  container as an ordinary CDK asset and an auto-created execution role
+  exposed as `.role`). Confirmed by importing and introspecting it in
+  `backend/infra/.venv`, not assumed from memory — this is a very new
+  service and worth re-checking the installed version's surface before
+  assuming a construct exists or has the same shape. AgentCore Runtime
+  names reject hyphens (letters/digits/underscores only); every other
+  `ProjectConfig`-derived name uses them, which is why `agent_stack.py`
+  needed its own `_runtime_name` rather than reusing `resource_name`.
 - **`Stack.add_dependency` is deprecated in aws-cdk-lib 2.266**; used
   `add_stack_dependency` instead. Worth watching for other deprecated
   APIs when copying wiring out of the vendored TS stacks, which pin an
@@ -1949,12 +2082,19 @@ content, not agent code.
   (`Hanzala`) exists in `~/.aws/config` but invoking it — even a
   read-only identity check — is refused by this session's own auto-mode
   permission classifier before it reaches AWS at all. So Next Up #1's
-  remaining half (provisioning AgentCore Runtime, building and pushing a
-  container, `cdk deploy`) cannot be attempted from this environment
-  even with `--profile Hanzala` supplied; it needs a session, or a
-  person, with standing permission to take real AWS actions. Worth
-  checking again at the start of whatever session picks up #1 rather
-  than assumed still true.
+  remaining half (building and pushing `agent_stack.py`'s container,
+  `cdk deploy`) cannot be attempted from this environment even with
+  `--profile Hanzala` supplied; it needs a session, or a person, with
+  standing permission to take real AWS actions. Confirmed still true when
+  the AgentCore Runtime CDK resources landed (below) — checked again
+  rather than assumed, per this note's own advice — and worth checking
+  again at the start of whatever session actually attempts the deploy.
+  **This environment also has no Docker** (`docker version` fails,
+  command not found), which blocks the same deploy a second, independent
+  way even if credentials arrived: `AgentRuntimeArtifact.from_asset`'s
+  image is only built and pushed during `cdk deploy`'s asset-publishing
+  step, never at `synth`, so `cdk synth` was unaffected and is how this
+  session verified the CDK resources at all.
 - **`fastapi.testclient.TestClient`'s WebSocket support has no timeout
   of its own** (`starlette.testclient.WebSocketTestSession.receive`
   blocks on a cross-thread queue with nothing bounding the wait), unlike

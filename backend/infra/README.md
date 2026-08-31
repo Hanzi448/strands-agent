@@ -6,7 +6,7 @@ concern, per `context/code-standards.md` -> AWS CDK (Python):
 | Stack file             | Stack name                     | Owns                                            |
 | ---------------------- | ------------------------------ | ----------------------------------------------- |
 | `data_stack.py`        | `ClinicPilot-Dev-Data`         | DynamoDB tables, knowledge base source S3 bucket |
-| `agent_stack.py`       | `ClinicPilot-Dev-Agent`        | One Bedrock Knowledge Base per demo clinic (S3 Vectors); AgentCore Runtime + Memory not yet built |
+| `agent_stack.py`       | `ClinicPilot-Dev-Agent`        | AgentCore Runtime hosting `agents/agentcore_app.py`; one Bedrock Knowledge Base per demo clinic (S3 Vectors); AgentCore Memory not yet built |
 | `api_stack.py`         | `ClinicPilot-Dev-Api`          | API Gateway, API Lambdas, Cognito (staff)       |
 | `automation_stack.py`  | `ClinicPilot-Dev-Automation`   | EventBridge schedule + background scan Lambda   |
 | `frontend_stack.py`    | `ClinicPilot-Dev-Frontend`     | S3 + CloudFront static hosting                  |
@@ -16,11 +16,20 @@ concern, per `context/code-standards.md` -> AWS CDK (Python):
 source bucket; `agent_stack.py` holds one Bedrock Knowledge Base per
 demo clinic (`config.DEMO_CLINIC_IDS`), each over its own Amazon S3
 Vectors bucket/index and reading only that clinic's `kb/{clinic_id}/`
-prefix — see `context/architecture.md` -> System Boundaries. AgentCore
-Runtime/Memory are not built yet. `api_stack.py`, `automation_stack.py`,
-and `frontend_stack.py` are still empty skeletons; their structure,
-naming, and deployment order are in place, and resources are added by
-the later items in `context/progress-tracker.md`.
+prefix, plus the AgentCore Runtime that hosts `agents/agentcore_app.py`
+— a container image asset built from `backend/Dockerfile`
+(`AgentRuntimeArtifact.from_asset`, an ordinary CDK asset: `cdk synth`
+needs neither Docker nor AWS credentials, only `cdk deploy`'s asset
+publishing step does), with its execution role granted exactly the
+DynamoDB and Bedrock calls `backend/tools/` makes — see
+`context/architecture.md` -> System Boundaries. AgentCore Memory is not
+built yet, and neither is the guest-identity Cognito role a browser will
+assume to invoke the runtime (`architecture.md` -> Auth and Access
+Model) — that lands with `api_stack.py`/`frontend_stack.py`.
+`api_stack.py`, `automation_stack.py`, and `frontend_stack.py` are still
+empty skeletons; their structure, naming, and deployment order are in
+place, and resources are added by the later items in
+`context/progress-tracker.md`.
 
 ## Tables
 
@@ -99,3 +108,8 @@ npx aws-cdk@2 synth --app '.venv\Scripts\python.exe app.py'
 ```
 
 `cdk.out/` is generated output -- never edit it, it is gitignored.
+
+`cdk deploy` (not `synth`) needs Docker running locally to build and push
+`agent_stack.py`'s container image asset -- `synth` only fingerprints the
+`backend/` source tree, which is why it works in an environment with
+neither Docker nor AWS credentials.

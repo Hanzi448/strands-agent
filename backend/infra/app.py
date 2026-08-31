@@ -41,8 +41,12 @@ def main() -> None:
     agent = AgentStack(
         app,
         config.stack_name("agent"),
-        description="ClinicPilot agent: AgentCore Runtime/Memory and the Bedrock Knowledge Base.",
+        description="ClinicPilot agent: AgentCore Runtime and the Bedrock Knowledge Base.",
         kb_bucket=data.kb_bucket,
+        clinics_table=data.clinics_table,
+        patients_table=data.patients_table,
+        appointments_table=data.appointments_table,
+        escalations_table=data.escalations_table,
         **common,
     )
 
@@ -67,10 +71,12 @@ def main() -> None:
         **common,
     )
 
-    # Deployment order. `agent` also takes `data.kb_bucket` directly (the
-    # Knowledge Base data sources read it); the rest are declared now so
-    # `cdk deploy --all` is correct from the first resource each stack gains.
-    agent.add_stack_dependency(data)        # KB reads the data stack's bucket
+    # Deployment order. `agent` also takes `data.kb_bucket` and all four
+    # tables directly (the Knowledge Base data sources read the bucket, and
+    # the AgentCore Runtime's execution role is granted against the
+    # tables); the rest are declared now so `cdk deploy --all` is correct
+    # from the first resource each stack gains.
+    agent.add_stack_dependency(data)        # KB bucket + table grants
     api.add_stack_dependency(data)          # dashboard handlers read the tables
     api.add_stack_dependency(agent)         # voice bridge targets the agent runtime
     automation.add_stack_dependency(data)   # background scan mutates the tables
