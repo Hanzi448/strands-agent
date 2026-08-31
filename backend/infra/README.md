@@ -5,14 +5,20 @@ concern, per `context/code-standards.md` -> AWS CDK (Python):
 
 | Stack file             | Stack name                     | Owns                                            |
 | ---------------------- | ------------------------------ | ----------------------------------------------- |
-| `data_stack.py`        | `ClinicPilot-Dev-Data`         | DynamoDB tables, knowledge base S3 bucket       |
-| `agent_stack.py`       | `ClinicPilot-Dev-Agent`        | AgentCore Runtime + Memory, Bedrock Knowledge Base |
+| `data_stack.py`        | `ClinicPilot-Dev-Data`         | DynamoDB tables, knowledge base source S3 bucket |
+| `agent_stack.py`       | `ClinicPilot-Dev-Agent`        | One Bedrock Knowledge Base per demo clinic (S3 Vectors); AgentCore Runtime + Memory not yet built |
 | `api_stack.py`         | `ClinicPilot-Dev-Api`          | API Gateway, API Lambdas, Cognito (staff)       |
 | `automation_stack.py`  | `ClinicPilot-Dev-Automation`   | EventBridge schedule + background scan Lambda   |
 | `frontend_stack.py`    | `ClinicPilot-Dev-Frontend`     | S3 + CloudFront static hosting                  |
 
-**Only `data_stack.py` has resources so far** — the four DynamoDB
-tables. The other four stacks are empty skeletons; their structure,
+**`data_stack.py` and `agent_stack.py` have resources so far.**
+`data_stack.py` holds the four DynamoDB tables and the knowledge base
+source bucket; `agent_stack.py` holds one Bedrock Knowledge Base per
+demo clinic (`config.DEMO_CLINIC_IDS`), each over its own Amazon S3
+Vectors bucket/index and reading only that clinic's `kb/{clinic_id}/`
+prefix — see `context/architecture.md` -> System Boundaries. AgentCore
+Runtime/Memory are not built yet. `api_stack.py`, `automation_stack.py`,
+and `frontend_stack.py` are still empty skeletons; their structure,
 naming, and deployment order are in place, and resources are added by
 the later items in `context/progress-tracker.md`.
 

@@ -42,6 +42,7 @@ def main() -> None:
         app,
         config.stack_name("agent"),
         description="ClinicPilot agent: AgentCore Runtime/Memory and the Bedrock Knowledge Base.",
+        kb_bucket=data.kb_bucket,
         **common,
     )
 
@@ -66,9 +67,9 @@ def main() -> None:
         **common,
     )
 
-    # Deployment order. Declared now so `cdk deploy --all` is correct from
-    # the first stack that gains a resource; no cross-stack references
-    # exist yet.
+    # Deployment order. `agent` also takes `data.kb_bucket` directly (the
+    # Knowledge Base data sources read it); the rest are declared now so
+    # `cdk deploy --all` is correct from the first resource each stack gains.
     agent.add_stack_dependency(data)        # KB reads the data stack's bucket
     api.add_stack_dependency(data)          # dashboard handlers read the tables
     api.add_stack_dependency(agent)         # voice bridge targets the agent runtime

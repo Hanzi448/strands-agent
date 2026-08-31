@@ -22,6 +22,15 @@ DEFAULT_PROJECT_PREFIX = "clinicpilot"
 
 DEFAULT_ENVIRONMENT = "dev"
 
+# The two demo clinics `project-overview.md` scopes this hackathon build
+# to (one dental, one cosmetic -- see `architecture.md` -> Storage Model,
+# "The two demo clinics differ in all four"). Self-serve clinic
+# onboarding is explicitly out of scope, so a fixed list here -- rather
+# than a dynamic lookup -- is correct for this build, not a shortcut:
+# `agent_stack.py` provisions one Bedrock Knowledge Base per id, and
+# `seed/` will write exactly these two `Clinics` rows.
+DEMO_CLINIC_IDS: tuple[str, ...] = ("clinic-dental", "clinic-cosmetic")
+
 # CloudFormation stack names are the one place the project name is shown
 # to a human, so it carries its display casing rather than the slug's.
 DEFAULT_STACK_PREFIX = "ClinicPilot"

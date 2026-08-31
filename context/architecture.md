@@ -10,7 +10,7 @@
 | Agent Hosting           | Bedrock AgentCore Runtime                                | Deploys and runs the agent(s)                                    |
 | Session Continuity      | Bedrock AgentCore Memory                                 | Per-patient conversation state across calls                      |
 | Orchestration Pattern   | Strands Agent-as-Tool                                    | Scheduling, FAQ, Escalation sub-agents wrapped as in-process tools, invoked by the Orchestrator agent |
-| RAG / Knowledge Base    | Amazon Bedrock Knowledge Base (S3-backed)                | Per-clinic FAQ retrieval, filtered/scoped by `clinic_id`         |
+| RAG / Knowledge Base    | Amazon Bedrock Knowledge Base, one per clinic, over Amazon S3 Vectors | Per-clinic FAQ retrieval — isolation is structural (a separate Knowledge Base id per clinic), not a `clinic_id` metadata filter on a shared one |
 | Background Automation   | Amazon EventBridge (Scheduler) + AWS Lambda              | Daily autonomous appointment scan and action                     |
 | API Layer               | Amazon API Gateway (REST + WebSocket) + Lambda           | Dashboard API, voice session bridge                              |
 | Database                | Amazon DynamoDB                                          | Clinics, patients, appointments, escalations — all `clinic_id`-partitioned |
@@ -73,10 +73,14 @@ EventBridge, Bedrock, and SES are all pay-per-use managed services.
   `voice_bridge.py` (WebSocket handler bridging the frontend to
   AgentCore Runtime, if not connecting directly).
 - `backend/infra/` — AWS CDK (Python) app. One stack per concern:
-  `data_stack.py` (DynamoDB, S3), `agent_stack.py` (AgentCore,
-  Bedrock KB), `api_stack.py` (API Gateway, Lambda, Cognito),
-  `automation_stack.py` (EventBridge, background Lambda),
-  `frontend_stack.py` (S3 + CloudFront).
+  `data_stack.py` (DynamoDB, the KB source S3 bucket), `agent_stack.py`
+  (AgentCore [not yet built] and one Bedrock Knowledge Base per demo
+  clinic — an S3 Vectors bucket/index and a data source scoped to that
+  clinic's `kb/{clinic_id}/` prefix, so no query can reach another
+  clinic's documents by construction rather than by a metadata filter),
+  `api_stack.py` (API Gateway, Lambda, Cognito), `automation_stack.py`
+  (EventBridge, background Lambda), `frontend_stack.py` (S3 +
+  CloudFront).
 - `frontend/src/voice/` — Voice session UI (mic capture, audio
   playback, WebSocket connection to the agent). Adapted from the AWS
   sample repo.
@@ -270,8 +274,11 @@ EventBridge, Bedrock, and SES are all pay-per-use managed services.
     `prod`.
 - **S3**:
   - Knowledge base source documents, one prefix per clinic
-    (`kb/{clinic_id}/...`), feeding the per-clinic Bedrock Knowledge
-    Base.
+    (`kb/{clinic_id}/...`), each feeding its own Bedrock Knowledge Base
+    (`backend/infra/agent_stack.py`) — a separate Knowledge Base id per
+    clinic over Amazon S3 Vectors, Titan Text Embeddings V2. Vector
+    embeddings themselves live in a separate S3 Vectors bucket, not this
+    one.
   - Frontend static build artifacts (served via CloudFront).
 - **AgentCore Memory**: per-patient conversation state/history across
   voice sessions — not duplicated in DynamoDB.

@@ -1,4 +1,4 @@
-"""Data stack: the four DynamoDB tables.
+"""Data stack: the four DynamoDB tables, plus the knowledge base bucket.
 
 Every table is partitioned by `clinic_id`, and every secondary index
 carries `clinic_id` in its own partition key -- `architecture.md` ->
@@ -7,16 +7,18 @@ keyed on anything else would be exactly such a path. See
 `architecture.md` -> Storage Model for the item shapes and the access
 patterns each index serves.
 
-The Knowledge Base source bucket named in `architecture.md` -> Storage
-Model also belongs to this stack but is not defined yet -- it is its own
-tracker item, since it is provisioned together with the Bedrock
-Knowledge Base that reads it.
+The knowledge base bucket holds each clinic's FAQ source documents under
+its own `kb/{clinic_id}/` prefix (`architecture.md` -> Storage Model,
+S3). `agent_stack.py`'s per-clinic Bedrock Knowledge Base reads this
+bucket, scoped to one clinic's prefix per data source -- never a query
+that spans clinics.
 """
 
 from __future__ import annotations
 
 from aws_cdk import CfnOutput, RemovalPolicy, Stack
 from aws_cdk import aws_dynamodb as dynamodb
+from aws_cdk import aws_s3 as s3
 from constructs import Construct
 
 from config import ProjectConfig
@@ -36,6 +38,16 @@ PHONE = "phone"
 # query key rather than a `patient_id`-only index that could, in
 # principle, be queried across clinics.
 CLINIC_PATIENT = "clinic_patient"
+
+# Knowledge base source prefix. One per clinic, so a Bedrock data source
+# scoped to this prefix can only ever ingest that clinic's documents --
+# `agent_stack.py` and, eventually, `seed/` both need this exact string.
+KB_BUCKET_PREFIX = "kb"
+
+
+def kb_source_prefix(clinic_id: str) -> str:
+    """The S3 prefix holding one clinic's knowledge base source documents."""
+    return f"{KB_BUCKET_PREFIX}/{clinic_id}/"
 
 # Index names. Referenced by the tool layer and passed to Lambdas as
 # environment variables alongside the table names.
@@ -132,7 +144,28 @@ class DataStack(Stack):
             ],
         )
 
+        self.kb_bucket = s3.Bucket(
+            self,
+            "KnowledgeBaseBucket",
+            bucket_name=self.config.resource_name("kb"),
+            block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
+            encryption=s3.BucketEncryption.S3_MANAGED,
+            enforce_ssl=True,
+            versioned=not self._ephemeral,
+            removal_policy=(
+                RemovalPolicy.DESTROY if self._ephemeral else RemovalPolicy.RETAIN
+            ),
+            auto_delete_objects=self._ephemeral,
+        )
+
         self._export_table_names()
+        CfnOutput(
+            self,
+            "KnowledgeBaseBucketName",
+            value=self.kb_bucket.bucket_name,
+            description="S3 bucket holding per-clinic knowledge base source documents.",
+            export_name=f"{self.config.resource_name('kb')}-bucket-name",
+        )
 
     def _table(
         self,

@@ -6,13 +6,16 @@ Update this file after every meaningful implementation change.
 
 - **Phase 3 has started.** Phase 2's tool layer is complete: the AWS
   sample is vendored as reference code, `backend/infra/` synthesises
-  with the four DynamoDB tables defined (the other four stacks are
-  still empty), and `backend/tools/` has its foundation, the complete
-  availability read surface, the complete scheduling write surface, and
-  the complete escalation surface. All four tables are written by that
-  layer. The one tool still missing is the FAQ query, which has nothing
-  to query until the Knowledge Base exists and therefore lands with it
-  (Next Up #2).
+  with the four DynamoDB tables and the KB source bucket defined in
+  `data_stack.py`, and the agent stack now also carries one Bedrock
+  Knowledge Base per demo clinic over Amazon S3 Vectors (the other three
+  stacks — API, automation, frontend — are still empty). `backend/tools/`
+  has its foundation, the complete availability read surface, the
+  complete scheduling write surface, and the complete escalation
+  surface. All four tables are written by that layer. The one tool
+  still missing is the FAQ query: the Knowledge Base it reads now
+  exists (as CDK, unsynthesised for real), so writing it is Next Up #2,
+  no longer blocked on infra that didn't exist.
 - `backend/agents/` now holds its **foundation** (`session.py`,
   `results.py`), **both patient-facing sub-agents** — Scheduling
   (`scheduling_agent.py`) and Escalation (`escalation_agent.py`) — the
@@ -59,14 +62,15 @@ Update this file after every meaningful implementation change.
   open questions at once — who greets the patient and what it costs in
   dead air, which voice each clinic answers in, and which text model the
   sub-agents reason with — all of which are answered by listening to one
-  call rather than by argument. The FAQ sub-agent still waits for the
-  Knowledge Base.
+  call rather than by argument. The FAQ sub-agent waited for the
+  Knowledge Base to exist as infrastructure; that landed as its own
+  unit (Completed, below), so the FAQ tool and sub-agent are next.
   Nothing in `backend/tools/` may move into an agent definition
   (`architecture.md` -> Invariants #3): the agents are a thin
   model-facing surface over functions the background Lambda will call
   directly. After the agents: Nova Sonic voice, AgentCore deploy, the
-  KB bucket plus the FAQ tool, the background Lambda, the dashboard,
-  and the seed scripts.
+  FAQ tool and sub-agent, the background Lambda, the dashboard, and the
+  seed scripts.
 
 ## Completed
 
@@ -957,6 +961,69 @@ Update this file after every meaningful implementation change.
   connection all remain, along with everything that needed a real call
   before this point.
 
+- **The Knowledge Base infrastructure: KB source bucket + one Bedrock
+  Knowledge Base per demo clinic** (old Next Up #2, infra half). CDK
+  only — `ai-workflow-rules.md` -> When to Split Work keeps this
+  separate from the FAQ tool/sub-agent that will read it, the same split
+  already applied to #1 (`agentcore_app.py` vs. its deploy). `data_stack.py`
+  gained `kb_bucket` and `kb_source_prefix(clinic_id)`
+  (`kb/{clinic_id}/`); `agent_stack.py`, empty until now, gained real
+  resources.
+  **A separate Knowledge Base per clinic, not one shared Knowledge Base
+  filtered by `clinic_id`.** `architecture.md` -> Stack previously read
+  "filtered/scoped by `clinic_id`", which this unit resolved toward the
+  stronger reading already implied by the Storage Model section's "the
+  *per-clinic* Bedrock Knowledge Base": one Knowledge Base id per
+  clinic, so `architecture.md` -> Invariants #1 holds because a
+  retrieval call is only ever given one clinic's Knowledge Base id,
+  never because a filter was applied correctly. `config.py` gained
+  `DEMO_CLINIC_IDS` (`clinic-dental`, `clinic-cosmetic`) as the one
+  place this fixed pair is spelled — correct for this build rather than
+  a shortcut, since `project-overview.md` -> Out of Scope rules out
+  self-serve onboarding, and `agent_stack.py` provisions a fixed
+  resource per id rather than reading a dynamic clinic list.
+  **Vector storage is Amazon S3 Vectors, not OpenSearch Serverless.**
+  `architecture.md` -> Stack already called the Knowledge Base
+  "S3-backed"; this unit made that literal — one `CfnVectorBucket` and
+  one `CfnIndex` per clinic (1024 dimensions, cosine), rather than an
+  OpenSearch Serverless collection, which would be a cluster to size and
+  keep warm for two small FAQ corpora with no other use in this stack.
+  Embeddings are Titan Text Embeddings V2 at its default width — an
+  AWS-native model needing no separate access request, picked as an
+  implementation default the way `TableV2` was for the tables, not
+  escalated as a product decision.
+  **The ingestion role is scoped per clinic, and the Knowledge Base
+  waits for its policy.** Each clinic gets its own IAM role and inline
+  `iam.Policy`, granted `bedrock:InvokeModel` on the embedding model
+  only, `s3:GetObject`/`ListBucket` on that clinic's own
+  `kb/{clinic_id}/` prefix only (not the whole bucket), and the
+  `s3vectors:*` actions needed on that clinic's own index ARN only —
+  `code-standards.md` -> AWS CDK's "no `*` resource/action grants," read
+  per clinic since nothing requires one role to reach two clinics'
+  documents. `CfnKnowledgeBase.add_dependency(ingestion_policy)` is
+  explicit rather than assumed, since CDK's automatic dependency
+  tracking follows attribute references (the role ARN) but not the fact
+  that a `.attach_inline_policy()` call happened — without it, a real
+  deploy could create the Knowledge Base before its role can read
+  anything.
+  Verified: `cdk synth` exits 0 with all five stacks still listed; the
+  Agent template carries both clinics' `AWS::S3Vectors::VectorBucket`,
+  two `AWS::S3Vectors::Index`, two `AWS::Bedrock::KnowledgeBase` (type
+  `S3_VECTORS`, dimension 1024, cosine), two `AWS::Bedrock::DataSource`
+  (each `inclusion_prefixes` scoped to one clinic), and each
+  `KnowledgeBase`'s `DependsOn` naming its own `IngestionPolicy` by
+  inspecting the synthesised JSON directly rather than assuming CDK's
+  reference wiring produced it. A `CLINICPILOT_ENV=prod` synth confirmed
+  the bucket's environment branch (retain + versioned, no
+  auto-delete-objects custom resource) and its artifacts were removed
+  after. `cdk deploy` remains untried — see Next Up #1's Session Note on
+  this environment's credentials.
+  **Not verified, and cannot be yet**: whether Amazon S3 Vectors is
+  available in `us-east-1` for real, and whether `retrieve` calls
+  against it actually return relevant FAQ passages — both need a real
+  deploy and real documents, which is what the FAQ tool (Next Up #2)
+  and a seeded clinic (#5) will exercise.
+
 ## In Progress
 
 - None.
@@ -976,28 +1043,43 @@ deployed one, from a program that runs into a call someone can listen
 to, and it is where the greeting, voice and text-model questions get
 answered.
 
+The old #2 ("KB bucket plus the Bedrock Knowledge Base") has had the
+same infra/logic split applied to it as #1 did
+(`ai-workflow-rules.md` -> When to Split Work): the infrastructure half
+— the KB source bucket and one Bedrock Knowledge Base per demo clinic —
+is in Completed below. What remains is the FAQ tool and sub-agent, now
+renumbered #2.
+
 1. Provision AgentCore Runtime and deploy `agentcore_app.py` to it,
    then verify one voice session end-to-end. The Python side is done
-   (see Completed) — this item is `agent_stack.py`'s CDK resources
-   (AgentCore Runtime, its container build/push, its execution role),
-   containerising `backend/` (a Dockerfile is not written yet — the
-   vendored sample's `agent/Dockerfile` is the reference shape, minus
-   the PyAudio/PortAudio layer this path does not need), and pointing a
-   real browser or `websocat`-style client at the deployed `/ws` with a
-   seeded clinic behind it. **Blocked in this environment specifically**:
-   see Session Notes — no AWS credentials are usable here for anything
-   beyond local, offline work, so this item needs a session (or a
-   person) that actually has them.
-2. Add the Knowledge Base source S3 bucket to the data stack
-   (`kb/{clinic_id}/` prefixes) and the Bedrock Knowledge Base over it
-   in the agent stack — these deploy together, so they are one unit.
-   The FAQ query tool and the FAQ sub-agent land with them, since they
-   have nothing to query until the KB exists. Note what the gap costs
-   today: the Orchestrator's only route for a price or preparation
-   question is `escalation_assistant`, so every FAQ becomes a card in
-   the staff queue. Correct, and lossy — wiring `faq_agent_tool` into
-   `orchestrator_tools` and moving those routes out of the escalation
-   paragraph of `ORCHESTRATOR_SYSTEM_PROMPT` is part of this item.
+   (see Completed) — this item is `agent_stack.py`'s remaining CDK
+   resources (AgentCore Runtime, its container build/push, its
+   execution role), containerising `backend/` (a Dockerfile is not
+   written yet — the vendored sample's `agent/Dockerfile` is the
+   reference shape, minus the PyAudio/PortAudio layer this path does not
+   need), and pointing a real browser or `websocat`-style client at the
+   deployed `/ws` with a seeded clinic behind it. **Blocked in this
+   environment specifically**: see Session Notes — no AWS credentials
+   are usable here for anything beyond local, offline work, so this item
+   needs a session (or a person) that actually has them.
+2. Write `backend/tools/faq.py` (a `query_faq` function calling Bedrock
+   Agent Runtime against the clinic's own Knowledge Base id — see Open
+   Questions for `retrieve` vs `retrieve_and_generate`, still
+   undecided) and `faq_agent.py` (the third sub-agent, same four-part
+   shape as `scheduling_agent.py`/`escalation_agent.py`), then wire
+   `faq_agent_tool` into `orchestrator_tools` and move price/prep/policy
+   routing out of the escalation paragraph of
+   `ORCHESTRATOR_SYSTEM_PROMPT`. Testable offline exactly as the other
+   tools are: a fake `bedrock-agent-runtime` client stands in for a real
+   Knowledge Base, the same way fake tables stand in for DynamoDB — no
+   dependency on a deployed KB or credentials. Each clinic's Knowledge
+   Base id is a real value only after `agent_stack.py` deploys
+   (blocked, see #1's Session Note); until then the tool resolves it
+   from an environment variable exactly as `dynamo.py` resolves table
+   names, and tests supply one directly. Note what the gap costs today:
+   the Orchestrator's only route for a price or preparation question is
+   `escalation_assistant`, so every FAQ becomes a card in the staff
+   queue. Correct, and lossy.
 3. Build the background Lambda + EventBridge schedule, reusing
    `backend/tools/` functions. Its no-show/reschedule heuristic is not
    specified anywhere yet — per `ai-workflow-rules.md` -> When to Split
@@ -1171,6 +1253,23 @@ answered.
   and could just as well be a clinic config field like `timezone`. Not
   invented: today both would sound identical. Worth one line either way
   before the demo is recorded.
+
+- **Does the FAQ tool call Bedrock's `retrieve` or
+  `retrieve_and_generate`?** Neither `architecture.md` nor
+  `project-overview.md` says which. `retrieve` returns raw passages and
+  leaves *composing* the spoken answer to the sub-agent's own model —
+  consistent with every other tool in `backend/tools/`, which return
+  facts for an agent to phrase, never a phrased answer themselves
+  (`code-standards.md` -> General, "business logic ... never inline
+  inside an agent definition" cuts the other way for a tool that already
+  contains an LLM call). `retrieve_and_generate` does the composing
+  inside the tool, in one Bedrock call, with no sub-agent judgement
+  over the wording — cheaper in round trips, but a second, hidden model
+  choice (which one generates?) and a second place an answer could
+  drift from `ORCHESTRATOR_SYSTEM_PROMPT`'s honesty rules. Leaning
+  `retrieve`, for consistency with the rest of the tool layer, but not
+  decided here — settle before writing `backend/tools/faq.py`
+  (Next Up #2).
 
 - **Can a patient ask what they already have booked?**
   `project-overview.md` lists check availability, book, reschedule,
