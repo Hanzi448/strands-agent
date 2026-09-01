@@ -98,9 +98,12 @@ npm run build   # or: npm run dev
 
 ### Seed scripts (dry run, no AWS client touched)
 
+Run from the **repository root**, not `backend/` — `seed/` lives next to
+`backend/`, not inside it, and its `__init__.py` puts `backend/` on
+`sys.path` itself once it's found:
+
 ```
-cd backend
-.venv\Scripts\python -m seed.run_seed --dry-run
+backend\.venv\Scripts\python -m seed.run_seed --dry-run
 ```
 
 Running any of these for real (a live text/voice call, a real `cdk deploy`,
