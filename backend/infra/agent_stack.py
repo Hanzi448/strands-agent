@@ -34,13 +34,14 @@ This stack owns:
 Vector storage is Amazon S3 Vectors (`architecture.md` -> Stack calls the
 Knowledge Base "S3-backed"), not OpenSearch Serverless: no cluster to
 size or keep warm for two small per-clinic FAQ corpora. One vector
-bucket, one vector index per clinic. Embeddings are Amazon Titan Text
-Embeddings V2 at its default 1024 dimensions -- an AWS-native model with
-no separate model access request, needed nowhere else in this stack, and
-a reasonable default for a small FAQ corpus rather than a product
-decision (see `progress-tracker.md` -> Open Questions for the KB
-decisions that *were* escalated: reranking, `retrieve` vs
-`retrieve_and_generate`, chunking).
+bucket, one vector index per clinic. Embeddings are Cohere Embed English
+v3 at its fixed 1024 dimensions -- not a product decision but a quota
+workaround: Titan Text Embeddings V2 was the original choice (AWS-native,
+no separate access request, same 1024 width) and this account turns out to
+have zero on-demand quota for it, so ingestion could never invoke it. See
+`EMBEDDING_MODEL_ID` for the detail, and `progress-tracker.md` -> Open
+Questions for the KB decisions that *were* escalated: reranking,
+`retrieve` vs `retrieve_and_generate`, chunking.
 
 The FAQ query tool (`backend/tools/faq.py`) and `faq_agent.py` are not
 part of this unit -- `ai-workflow-rules.md` -> When to Split Work keeps
@@ -90,10 +91,20 @@ from constructs import Construct
 from config import DEMO_CLINIC_IDS, ProjectConfig
 from data_stack import kb_source_prefix
 
-# Titan Text Embeddings V2, at its default output width. Bedrock
-# foundation-model ARNs are not account-scoped, so this is safe to build
-# directly rather than looking anything up.
-EMBEDDING_MODEL_ID = "amazon.titan-embed-text-v2:0"
+# Cohere Embed English v3, whose output width is a fixed 1024 -- the same
+# width Titan Text Embeddings V2 was configured at, so the vector index
+# below is unchanged by this swap. Bedrock foundation-model ARNs are not
+# account-scoped, so this is safe to build directly rather than looking
+# anything up.
+#
+# Not Titan v2: this account has zero on-demand quota allocated for
+# `amazon.titan-embed-text-v2:0` (confirmed by AWS Support), so every
+# ingestion `InvokeModel` fails with `ThrottlingException`. Raising it is
+# a 2-4 week Service Quotas request. `cohere.embed-english-v3` has
+# working on-demand quota here, verified by a direct `invoke-model` call
+# returning a real 1024-float embedding. Revisit once the quota lands --
+# this is a quota workaround, not a model-quality decision.
+EMBEDDING_MODEL_ID = "cohere.embed-english-v3"
 EMBEDDING_DIMENSIONS = 1024
 
 # Duplicated from `tools/faq.py`'s `KB_ID_ENV_PREFIX`, not imported: this

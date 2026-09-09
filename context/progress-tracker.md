@@ -2058,7 +2058,50 @@ Update this file after every meaningful implementation change.
 
 ## In Progress
 
-- None.
+- **Knowledge Base embedding model swap: Titan v2 -> Cohere Embed English
+  v3.** Code change is done and synthesises; the deploy is **not** run, and
+  **AWS is mid-swap** — read this before touching the Agent stack.
+
+  *Why:* this account has zero on-demand quota for
+  `amazon.titan-embed-text-v2:0` (confirmed by AWS Support), so every
+  ingestion `InvokeModel` fails with `ThrottlingException`. Raising it is a
+  2-4 week Service Quotas request. `cohere.embed-english-v3` has working
+  quota here — verified by a direct `invoke-model` returning a real
+  1024-float embedding, while the same call against Titan v2 still
+  throttles. Both models are 1024-wide, so `EMBEDDING_DIMENSIONS` and both
+  `s3vectors.CfnIndex` dimensions are unchanged (`cdk diff` confirmed the
+  indexes are untouched).
+
+  *Changed:* `backend/infra/agent_stack.py` only — `EMBEDDING_MODEL_ID`
+  plus the two comment blocks explaining it. Nothing outside CDK ever
+  names an embedding model (Bedrock embeds internally during ingestion),
+  so `seed/` and `backend/tools/` needed no change.
+
+  *Live AWS state — the part that matters:* `ClinicPilot-Dev-Agent` is
+  `UPDATE_ROLLBACK_COMPLETE` and **both Knowledge Bases have been deleted
+  out-of-band**, so the deployed template references two resources that no
+  longer exist. The first deploy attempt failed because
+  `VectorKnowledgeBaseConfiguration` is in the CFN resource's
+  `createOnlyProperties` (see Session Notes) — changing the embedding model
+  replaces the KB, and the deterministic name collided with the live one
+  (409 `AlreadyExists`). Deleting the old KBs was safe and deliberate: both
+  were verifiably empty (0 vectors in each S3 Vectors index, zero ingestion
+  jobs ever), and the S3 source documents were untouched.
+
+  *To resume, in order:*
+  1. `cdk deploy ClinicPilot-Dev-Agent --exclusively` from
+     `backend/infra` (needs Docker running — the run also picks up a
+     container asset rebuild for commit `7fcd5d5`, which the deployed
+     runtime predates). This recreates both KBs on Cohere under their
+     original names.
+  2. Copy the new `DentalKnowledgeBaseId` / `CosmeticKnowledgeBaseId`
+     outputs into `.env` — replacement mints **new** ids, so the two
+     `CLINICPILOT_KB_ID_*` values there are now dead. The runtime's own
+     copies are CFN references and update themselves.
+  3. `python -m seed.run_seed --skip clinics --skip appointments --skip
+     staff` to run only the FAQ step, then poll
+     `get-ingestion-job` — the step only *starts* a job, so a clean exit
+     is not yet proof that embedding worked.
 
 ## Next Up
 
@@ -2838,6 +2881,29 @@ accordingly.
   parameter change once Next Up #2's UI item picks a domain.
 
 ## Session Notes
+
+- **A Bedrock Knowledge Base's embedding model cannot be changed in
+  place.** `AWS::Bedrock::KnowledgeBase` lists
+  `/properties/KnowledgeBaseConfiguration/VectorKnowledgeBaseConfiguration`
+  (the whole property, not just its `Type`) in `createOnlyProperties`, so
+  editing `EmbeddingModelArn` **replaces** the Knowledge Base. Because
+  `agent_stack.py` names each KB deterministically via
+  `config.resource_name`, the replacement's create collides with the live
+  resource and the update fails with a 409 `AlreadyExists` — the stack
+  rolls back cleanly, but the swap cannot proceed without either freeing
+  the name (delete the old KB first) or changing it. Verify with
+  `aws cloudformation describe-type --type RESOURCE --type-name
+  AWS::Bedrock::KnowledgeBase`. Two traps worth remembering: `cdk diff`
+  rendered this as a plain `[~]` in-place update and did **not** flag the
+  replacement, so the diff is not trustworthy for create-only properties;
+  and the S3 Vectors index is a separate CFN resource that survives the
+  KB's replacement, so an index still attached to the outgoing KB is a
+  second possible conflict if you rename instead of deleting.
+
+- **`cmd > log 2>&1; echo "EXIT=$?"` reports the `echo`'s status, not the
+  command's.** A failed `cdk deploy` was read as exit 0 that way — the
+  rollback was only visible in the log body. Capture the code immediately
+  (`cmd; rc=$?`) or `tee` the deploy log and read it.
 
 - **Strands passes a tool's return value through `json.dumps`**, and
   falls back to `repr` when that fails — so a `Decimal` reaching a tool
