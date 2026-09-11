@@ -205,6 +205,11 @@ def _response(
 ) -> dict[str, Any]:
     return {
         "statusCode": status_code,
-        "headers": {"Content-Type": "application/json"},
+        "headers": {
+            "Content-Type": "application/json",
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Headers": "Authorization,Content-Type",
+            "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
+	    },
         "body": json.dumps({"data": data, "error": error}, cls=_DecimalEncoder),
     }
