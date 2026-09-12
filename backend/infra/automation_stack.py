@@ -143,6 +143,7 @@ class AutomationStack(Stack):
                 # same two variables `agent_stack.py`'s runtime sets.
                 "CLINICPILOT_PROJECT_PREFIX": self.config.project_prefix,
                 "CLINICPILOT_ENV": self.config.environment,
+                "CLINICPILOT_REMINDER_SENDER_EMAIL": "hanzalasalaheen@gmail.com",
                 # Deliberately absent: `tools.automation.REMINDER_SENDER_ENV`
                 # (`CLINICPILOT_REMINDER_SENDER_EMAIL`). No SES sender
                 # identity is verified yet (`progress-tracker.md` -> Open
