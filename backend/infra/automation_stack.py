@@ -143,11 +143,13 @@ class AutomationStack(Stack):
                 # same two variables `agent_stack.py`'s runtime sets.
                 "CLINICPILOT_PROJECT_PREFIX": self.config.project_prefix,
                 "CLINICPILOT_ENV": self.config.environment,
-                "CLINICPILOT_REMINDER_SENDER_EMAIL": "hanzalasalaheen@gmail.com",
-                # Deliberately absent: `tools.automation.REMINDER_SENDER_ENV`
-                # (`CLINICPILOT_REMINDER_SENDER_EMAIL`). No SES sender
-                # identity is verified yet (`progress-tracker.md` -> Open
-                # Questions) -- set once one exists, not invented here.
+                # `tools.automation.REMINDER_SENDER_ENV`. SES stays in
+                # sandbox mode for the demo, so this address must be a
+                # *verified* SES identity in this account/region -- and in
+                # sandbox every recipient must be verified too, which is why
+                # the demo sends to the same address it sends from
+                # (`progress-tracker.md` -> Session Notes).
+                "CLINICPILOT_REMINDER_SENDER_EMAIL": "salaheenhanzala624@gmail.com",
             },
         )
 

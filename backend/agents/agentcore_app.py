@@ -29,27 +29,29 @@ runtime and hearing a real call remain open, in `progress-tracker.md`.
 
 **The clinic is chosen when the connection opens, never by what the
 patient says.** `architecture.md` -> Auth and Access Model has the
-browser pick a clinic before the call starts. The query string is where
-that arrives -- `/ws?clinic_id=clinic-dental` -- not the first message
-sent once the socket is open, so there is no point in the exchange
-where a spoken sentence could relabel the call. It is also not an
-invented mechanism: AgentCore's own presigned URL already carries the
-session id the same way
-(`X-Amzn-Bedrock-AgentCore-Runtime-Session-Id` in
-`websocket-presigned.ts`), and query parameters are exactly what
-survives AgentCore's proxy from that public URL through to this
-container's `/ws` route.
+browser pick a clinic before the call starts. That choice arrives as
+the **first WebSocket message** -- `{"clinic_id": "clinic-dental"}` --
+sent by the browser the moment the socket opens and consumed here
+before the agent is built or the greeting plays, so there is no point
+in the exchange where a spoken sentence could relabel the call. It
+used to ride the presigned URL's query string; a live probe of the
+deployed runtime (2026-09-13, `progress-tracker.md` -> Open Questions)
+proved AgentCore's gateway strips custom query parameters before they
+reach this container, and the browser's WebSocket API cannot set
+headers on the opening handshake at all -- so the first frame is the
+only channel left, and the one AWS's own browser-mode guidance points
+at for per-session data.
 
-**A call that cannot open is refused before `accept()`, not after.**
-`start_voice_call` reads the clinic row, so a missing clinic id, an
-unknown clinic, or a config this process cannot resolve all fail before
-the socket is accepted -- there is no half-open connection charged to
-Bedrock for a call that was never going to work. Starlette allows
-`WebSocket.close()` before `accept()` for exactly this. Only the
-failure's stable `code` crosses the socket as the close reason; the
-message itself is logged, never sent, for the reason `results.py`
-already gives `ConfigurationError`: the far end is an anonymous browser
-tab, not a developer with a terminal.
+**A call that cannot open is refused as early as the channel allows.**
+The handshake is read and validated before `start_voice_call` builds
+anything, so a missing clinic id, an unknown clinic, or a config this
+process cannot resolve all fail before a Bedrock model is started --
+the socket is open (the channel requires it) but nothing is charged
+to a call that was never going to work. Only the failure's stable
+`code` crosses the socket as the close reason; the message itself is
+logged, never sent, for the reason `results.py` already gives
+`ConfigurationError`: the far end is an anonymous browser tab, not a
+developer with a terminal.
 
 **Nothing here calls `agent.stop()`.** `BidiAgent.run`'s own `finally`
 already stops every input, every output and the agent itself
@@ -82,10 +84,11 @@ from .voice import Greeting, start_voice_call
 
 logger = logging.getLogger(__name__)
 
-# What the connection is expected to carry the clinic id as. A query
-# parameter, not a path segment: AgentCore's own public URL already adds
-# one (the session id, in `websocket-presigned.ts`), so this rides the
-# same mechanism rather than inventing a second one.
+# What the connection's first WebSocket message is expected to carry
+# the clinic id as: a JSON object with this key. Not a query parameter
+# -- AgentCore's gateway strips those before they reach this container
+# (verified live, see the module docstring) -- and not a header, which
+# the browser's WebSocket API cannot set on the opening handshake.
 CLINIC_ID_PARAM: Final[str] = "clinic_id"
 
 # WebSocket close codes this endpoint can send. Standard codes rather
@@ -113,13 +116,14 @@ async def voice_session(websocket: WebSocket) -> None:
     """Answer one patient call: read the clinic, then run the front desk.
 
     Args:
-        websocket: The browser's connection. `clinic_id` is read from its
-            query string before `accept()`, and nothing sent afterwards
-            can change it.
+        websocket: The browser's connection. Its first message carries
+            the `clinic_id`, read and validated before the agent is
+            built; nothing sent afterwards can change it.
     """
-    clinic_id = websocket.query_params.get(CLINIC_ID_PARAM)
-    if not clinic_id:
-        logger.warning("a call arrived with no %s", CLINIC_ID_PARAM)
+    await websocket.accept()
+
+    clinic_id = await _read_clinic_id(websocket)
+    if clinic_id is None:
         await websocket.close(code=CLOSE_POLICY_VIOLATION, reason="missing_clinic_id")
         return
 
@@ -127,7 +131,7 @@ async def voice_session(websocket: WebSocket) -> None:
         agent = start_voice_call(clinic_id, text_model=_from_env(TEXT_MODEL_ENV))
     except ToolError as error:
         logger.warning(
-            "call for %r refused before it opened: %s", clinic_id, error.message
+            "call for %r refused at the handshake: %s", clinic_id, error.message
         )
         await websocket.close(code=CLOSE_POLICY_VIOLATION, reason=error.code)
         return
@@ -136,7 +140,6 @@ async def voice_session(websocket: WebSocket) -> None:
         await websocket.close(code=CLOSE_INTERNAL_ERROR, reason="internal_error")
         return
 
-    await websocket.accept()
     logger.info("call for %r connected", clinic_id)
     try:
         await agent.run(
@@ -162,6 +165,35 @@ async def voice_session(websocket: WebSocket) -> None:
             await websocket.close()
         except Exception:
             logger.debug("closing the socket for %r failed", clinic_id, exc_info=True)
+
+
+async def _read_clinic_id(websocket: WebSocket) -> str | None:
+    """Read the handshake message and pull the clinic id out of it.
+
+    Returns:
+        The clinic id the browser named, or `None` when the first
+        message is anything this protocol does not recognise -- absent,
+        not an object, not a non-empty string -- or when the browser
+        disconnects before sending one. Every one of those is the same
+        fact to the caller: no clinic was named, so there is no call.
+    """
+    try:
+        handshake = await websocket.receive_json()
+    except WebSocketDisconnect:
+        logger.info("a call disconnected before naming a clinic")
+        return None
+    except Exception:
+        logger.warning("a call's handshake was not valid JSON")
+        return None
+
+    if not isinstance(handshake, dict):
+        logger.warning("a call's handshake was not a JSON object")
+        return None
+    clinic_id = handshake.get(CLINIC_ID_PARAM)
+    if not isinstance(clinic_id, str) or not clinic_id:
+        logger.warning("a call arrived with no %s", CLINIC_ID_PARAM)
+        return None
+    return clinic_id
 
 
 def _from_env(name: str) -> str | None:

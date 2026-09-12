@@ -4,13 +4,14 @@ Like `mic.py` this module is wiring and nothing else, so what is worth
 pinning is not the FastAPI boilerplate but the ways the wiring could
 quietly cost money or leak something it must not.
 
-*A call that cannot work is refused before it is accepted.* A missing
+*A call that cannot work is refused at the handshake.* A missing
 clinic id, an unknown clinic, and a clinic whose stored config this
-process cannot resolve are all rejected with `WebSocket.close()` before
-`accept()` -- no socket is ever opened for a call that was never going
-to work, and Starlette's own test client proves this by raising
-`WebSocketDisconnect` from the connection attempt itself rather than
-from a message read afterwards.
+process cannot resolve are all rejected after the first message is
+read but before any Bedrock model is started -- the handshake-first
+protocol (AgentCore's gateway strips custom query parameters, so the
+first WebSocket frame is the only channel the browser can name its
+clinic on; see the module docstring) means the socket is open by then,
+but nothing is charged to a call that was never going to work.
 
 *Only a stable code crosses the socket, never the failure's message.*
 The far end of a rejected connection is an anonymous browser tab, not a
@@ -103,40 +104,59 @@ def test_ping_reports_healthy() -> None:
 
 
 # --------------------------------------------------------------------------
-# A call that cannot work is refused before it is accepted
+# A call that cannot work is refused at the handshake
 # --------------------------------------------------------------------------
 
 
-def test_a_call_with_no_clinic_id_is_refused_before_accept() -> None:
+def test_a_call_with_no_clinic_id_is_refused_at_the_handshake() -> None:
     """There is no default clinic and no way to ask the patient for one --
-    the connection itself is malformed."""
-    with pytest.raises(WebSocketDisconnect) as excinfo:
-        with TestClient(app).websocket_connect("/ws"):
-            pass
+    a handshake that names no clinic is the connection itself being
+    malformed."""
+    with TestClient(app).websocket_connect("/ws") as session:
+        with pytest.raises(WebSocketDisconnect) as excinfo:
+            session.send_json({"hello": "clinic?"})
+            while True:
+                session.receive_json()
     assert excinfo.value.code == CLOSE_POLICY_VIOLATION
     assert excinfo.value.reason == "missing_clinic_id"
 
 
-def test_an_unknown_clinic_is_refused_before_accept(tables) -> None:  # noqa: F811
+def test_a_non_object_handshake_is_refused_the_same_way() -> None:
+    """A JSON array or a bare string is not a clinic selection either --
+    every malformed handshake is the one fact `missing_clinic_id` names."""
+    with TestClient(app).websocket_connect("/ws") as session:
+        with pytest.raises(WebSocketDisconnect) as excinfo:
+            session.send_json(["clinic-dental"])
+            while True:
+                session.receive_json()
+    assert excinfo.value.code == CLOSE_POLICY_VIOLATION
+    assert excinfo.value.reason == "missing_clinic_id"
+
+
+def test_an_unknown_clinic_is_refused_at_the_handshake(tables) -> None:  # noqa: F811
     """`start_voice_call` reads the clinic row before anything else, so a
-    bad id fails while there is still a connection attempt to refuse
-    rather than an open socket to a front desk with nothing behind it."""
+    bad id fails before a front desk with nothing behind it is ever
+    built."""
     tables()
-    with pytest.raises(WebSocketDisconnect) as excinfo:
-        with TestClient(app).websocket_connect("/ws?clinic_id=clinic-nope"):
-            pass
+    with TestClient(app).websocket_connect("/ws") as session:
+        with pytest.raises(WebSocketDisconnect) as excinfo:
+            session.send_json({"clinic_id": "clinic-nope"})
+            while True:
+                session.receive_json()
     assert excinfo.value.code == CLOSE_POLICY_VIOLATION
     assert excinfo.value.reason == NotFoundError.code
 
 
-def test_a_malformed_clinic_config_is_refused_before_accept(tables) -> None:  # noqa: F811
+def test_a_malformed_clinic_config_is_refused_at_the_handshake(tables) -> None:  # noqa: F811
     """The same `ConfigurationError` `test_orchestrator.py` proves fails
     before the greeting over text, here over the socket that would have
     carried the call."""
     tables(clinics=FakeClinicsTable(dental_clinic() | {"timezone": "Mars/Olympus"}))
-    with pytest.raises(WebSocketDisconnect) as excinfo:
-        with TestClient(app).websocket_connect(f"/ws?clinic_id={DENTAL}"):
-            pass
+    with TestClient(app).websocket_connect("/ws") as session:
+        with pytest.raises(WebSocketDisconnect) as excinfo:
+            session.send_json({"clinic_id": DENTAL})
+            while True:
+                session.receive_json()
     assert excinfo.value.code == CLOSE_POLICY_VIOLATION
     assert excinfo.value.reason == ConfigurationError.code
 
@@ -146,9 +166,11 @@ def test_only_the_stable_code_crosses_the_socket_not_the_message(tables) -> None
     message quotes the bad attribute value -- that must stay server-side,
     exactly as `results.py` already keeps it out of a patient's ear."""
     tables(clinics=FakeClinicsTable(dental_clinic() | {"timezone": "Mars/Olympus"}))
-    with pytest.raises(WebSocketDisconnect) as excinfo:
-        with TestClient(app).websocket_connect(f"/ws?clinic_id={DENTAL}"):
-            pass
+    with TestClient(app).websocket_connect("/ws") as session:
+        with pytest.raises(WebSocketDisconnect) as excinfo:
+            session.send_json({"clinic_id": DENTAL})
+            while True:
+                session.receive_json()
     assert excinfo.value.reason == "configuration_error"
     assert "Mars/Olympus" not in (excinfo.value.reason or "")
 
@@ -173,7 +195,8 @@ def test_the_agent_speaks_first_in_the_vendored_frontends_own_wire_shape(
     _patch_voice_model(monkeypatch, model)
 
     def call() -> list[dict[str, Any]]:
-        with TestClient(app).websocket_connect(f"/ws?clinic_id={DENTAL}") as session:
+        with TestClient(app).websocket_connect("/ws") as session:
+            session.send_json({"clinic_id": DENTAL})
             return _collect_until_disconnect(session)
 
     events = _with_timeout(call)
@@ -202,7 +225,8 @@ def test_what_the_patient_sends_reaches_the_model(
     _patch_voice_model(monkeypatch, model)
 
     def call() -> None:
-        with TestClient(app).websocket_connect(f"/ws?clinic_id={DENTAL}") as session:
+        with TestClient(app).websocket_connect("/ws") as session:
+            session.send_json({"clinic_id": DENTAL})
             # The greeting's reply: exactly a transcript and a
             # response-complete event, before anything else is sent.
             session.receive_json()
@@ -236,7 +260,8 @@ def test_the_browser_disconnecting_mid_call_does_not_escape_the_handler(
     _patch_voice_model(monkeypatch, model)
 
     def call() -> None:
-        with TestClient(app).websocket_connect(f"/ws?clinic_id={DENTAL}") as session:
+        with TestClient(app).websocket_connect("/ws") as session:
+            session.send_json({"clinic_id": DENTAL})
             session.receive_json()
             session.receive_json()
             # No more turns are consumed and nothing more is sent: the
@@ -248,20 +273,22 @@ def test_the_browser_disconnecting_mid_call_does_not_escape_the_handler(
     _with_timeout(call)  # must return normally, not raise or hang
 
 
-def test_the_clinic_answered_for_is_whichever_the_query_string_names(
+def test_the_clinic_answered_for_is_whichever_the_handshake_names(
     tables,  # noqa: F811
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """`architecture.md` -> Auth and Access Model has the browser choose
-    the clinic before the call starts. Connecting to the cosmetic clinic
-    must build the cosmetic clinic's front desk, proven by the prompt the
-    model was started with rather than assumed from the code path."""
+    the clinic before the call starts. Naming the cosmetic clinic in the
+    handshake must build the cosmetic clinic's front desk, proven by the
+    prompt the model was started with rather than assumed from the code
+    path."""
     tables()
     model = HangingUpBidiModel()
     _patch_voice_model(monkeypatch, model)
 
     def call() -> None:
-        with TestClient(app).websocket_connect(f"/ws?clinic_id={COSMETIC}") as session:
+        with TestClient(app).websocket_connect("/ws") as session:
+            session.send_json({"clinic_id": COSMETIC})
             _collect_until_disconnect(session)
 
     _with_timeout(call)

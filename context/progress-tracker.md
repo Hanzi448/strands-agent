@@ -2103,6 +2103,13 @@ Update this file after every meaningful implementation change.
      `get-ingestion-job` — the step only *starts* a job, so a clean exit
      is not yet proof that embedding worked.
 
+  *Status note (2026-09-12): the user reports the full CDK deploy and
+  seed have since been run and the frontend tested locally. Whether
+  these resume steps were executed as part of that is unconfirmed —
+  check the Agent stack's current status and the two
+  `DentalKnowledgeBaseId` / `CosmeticKnowledgeBaseId` outputs before
+  touching anything here.*
+
 ## Next Up
 
 Both halves of the old "drive the voice agent" item are in Completed:
@@ -2161,44 +2168,75 @@ which needs the same credentials and deployed stacks Next Up #1's actual
 `cdk deploy` does. See Completed. The numbered list is renumbered
 accordingly.
 
-1. Deploy `agentcore_app.py` to the AgentCore Runtime `agent_stack.py`
-   now defines, then verify one voice session end-to-end. Both the
-   Python side and the CDK side are done (see Completed) — this item is
-   now purely `cdk deploy` (needs Docker, to build and push
-   `backend/Dockerfile`'s image, and AWS credentials, to create the
-   stack) plus pointing a real browser or `websocat`-style client at the
-   deployed `/ws` with a seeded clinic behind it. The guest-identity
-   Cognito role a browser needs to invoke it now exists too (see
-   Completed) — this item no longer needs any new infrastructure, only
-   the deploy itself.
-   **Blocked in this environment specifically**: see Session Notes — no
-   Docker and no AWS credentials are usable here for anything beyond
-   local, offline work, so this item needs a session (or a person) that
-   actually has both. The same is now true of running `seed/run_seed.py`
-   for real (its code is done — see Completed): it needs the five stacks
-   deployed and `$CLINICPILOT_STAFF_USER_POOL_ID` /
-   `$CLINICPILOT_STAFF_DEMO_PASSWORD` / one `$CLINICPILOT_KB_ID_...` per
-   clinic from those stacks' outputs, none of which exist until #1's
-   `cdk deploy` runs somewhere with Docker and credentials. Also what
-   will let `NO_SHOW_RISK_THRESHOLD` (`tools/automation.py`) be judged
-   against real data rather than argued about, and what a verified SES
-   sender identity needs to exist for, so
-   `CLINICPILOT_REMINDER_SENDER_EMAIL` can finally be set on the
-   background scan Lambda's environment (`automation_stack.py`).
-2. **Demo video, live demo link, AWS Builder ID / builder.aws.com post.**
-   The architecture diagram and README half of the old #2 is done (see
-   Completed) — a root `LICENSE` (MIT) and `docs/architecture.md` (a
-   Mermaid system diagram plus a reading guide tying it back to
-   `architecture.md` -> Invariants) now exist too, alongside a rewritten
-   root `README.md` covering status, stack, repo layout, local run
-   instructions for every piece that *can* run here (tests, `cdk synth`,
-   frontend build, seed `--dry-run`), and a submission checklist. What
-   remains of this item is exactly what remains of #1: a demo video and a
-   live demo link both need something deployed and real to film/link, and
-   an AWS Builder ID is an account signup only the user can do, not
-   something this environment can act on. Folded together with #1 rather
-   than kept separate, since both are blocked by the same missing deploy
-   (Session Notes).
+1. **Patient voice UI** — `frontend/src/voice/`: clinic picker, presigned
+   WebSocket to the deployed `/ws` (guest identity-pool credentials),
+   mic capture + audio playback, live transcript, voice orb.
+   Plan: `docs/superpowers/plans/2026-09-12-patient-voice-ui.md`.
+   Frontend-only unit (`ai-workflow-rules.md` -> When to Split Work).
+   **Status (2026-09-13): code complete and unit-tested** (27 Vitest
+   tests, `npm run build` clean) — `voice/` picker/orb/transcript/hook
+   plus all connection modules, and `App.tsx` now routes `#/voice`.
+   Two deploy-blocking facts were discovered and fixed while verifying
+   end-to-end, both in `api_stack.py` (deployed live, see Session
+   Notes): the guest role needed the
+   `bedrock-agentcore:InvokeAgentRuntimeWithWebSocketStream` action
+   (the L2's `grant_invoke_runtime` covers only plain
+   `InvokeAgentRuntime`), and the browser must use the Cognito
+   **basic (classic) auth flow** (`GetOpenIdToken` + STS
+   `AssumeRoleWithWebIdentity`), because enhanced-flow
+   `GetCredentialsForIdentity` applies an unauthenticated scope-down
+   session policy whose service allow-list excludes bedrock-agentcore
+   entirely — no role policy can override it.
+   **The tenant-selection decision is made (2026-09-13): the first
+   WebSocket message.** The browser sends `{"clinic_id": ...}` as its
+   first frame; `agentcore_app.py` reads and validates it after
+   `accept()`. Implemented on both ends (`agentcore_app.py` +
+   `test_agentcore_app.py`; `agentSocket.ts`), the Agent stack was
+   redeployed, and the live probe proved the whole wire chain:
+   basic-flow credentials, presign, socket open, handshake accepted,
+   and a real Nova Sonic connection (`bidi_connection_start`,
+   input tokens growing).
+   **What remains is one live bug: the agent never speaks.** No
+   transcript or audio comes back within 45s (output tokens pinned at
+   0). Diagnosed locally against real Nova Sonic — see the Session
+   Note "The greeting silence" for the full state and how to resume.
+   Then the real browser session, cleanup of the two scratch probes,
+   and this item is done.
+2. **Escalation email notifications** — when the agent creates an
+   escalation, notify clinic staff by email (SES) so an escalation is
+   actionable without watching the dashboard.
+3. **Frontend hosting stack** — fill the empty `frontend_stack.py`: S3 +
+   CloudFront for the built SPA, producing the public demo link item #6
+   needs.
+4. **AgentCore Memory** — session state per `architecture.md`, so the
+   voice agent remembers context across a call (and optionally across
+   calls) without process-level state.
+5. **Settings tab** — editable hours and services (user decision,
+   2026-09-12): staff edit hours/closures/services in the dashboard,
+   writing to the Clinics table. Needs a new authenticated write route
+   plus validation — backend unit first, then its frontend half.
+6. Deploy `agentcore_app.py` to the AgentCore Runtime and verify one
+   voice session end-to-end. **Status note (2026-09-12): the user
+   reports the CDK deploy and seed have now been run and the frontend
+   tested locally** — the "blocked in this environment" caveats that
+   used to sit on this item predate that report. What it still needs is
+   the real voice-session verification (a browser pointed at the
+   deployed `/ws` with a seeded clinic behind it), which item #1's UI is
+   what makes possible. Whether the KB-swap resume steps in "In
+   Progress" were part of the reported deploy is unconfirmed; read that
+   section before touching the Agent stack.
+7. **Demo video, live demo link, AWS Builder ID / builder.aws.com
+   post.** The architecture diagram and README half of the old #2 is
+   done (see Completed) — a root `LICENSE` (MIT) and
+   `docs/architecture.md` (a Mermaid system diagram plus a reading
+   guide tying it back to `architecture.md` -> Invariants) now exist
+   too, alongside a rewritten root `README.md` covering status, stack,
+   repo layout, local run instructions for every piece that *can* run
+   here (tests, `cdk synth`, frontend build, seed `--dry-run`), and a
+   submission checklist. What remains of this item needs #3's hosting
+   stack for the live demo link and #6's verified deployment for
+   something real to film/link; an AWS Builder ID is an account signup
+   only the user can do.
 
 ## Open Questions
 
@@ -2551,6 +2589,45 @@ accordingly.
   whose national numbers can legitimately start with `0` after the trunk
   digit is removed) or something more deliberate.
 
+- **Public clinic-listing route?** The patient voice UI needs the list
+  of clinics before a call, but the dashboard API is staff-auth-only.
+  Interim answer (2026-09-12): a static registry in
+  `frontend/src/voice/lib/clinics.ts` holding the two seeded demo
+  clinics — fine for a two-clinic demo, wrong the moment clinics are
+  added in DynamoDB. Should a public, read-only, unauthenticated
+  `/clinics` route exist instead?
+
+- ~~**Does AgentCore's presigned-URL proxy forward extra query parameters
+  (`clinic_id`) to `/ws`?**~~ **Answered (2026-09-13, definitively):
+  no.** A live probe — guest credentials via the Cognito basic flow,
+  SigV4-presigned `/ws` URL with `clinic_id` in the signed query —
+  reached the deployed runtime and was rejected by *our own app*,
+  whose CloudWatch log shows `a call arrived with no clinic_id`
+  followed by `WebSocket /ws 403`. The IAM layer passed (the 403 came
+  from the app, not the edge), so the socket genuinely arrived at
+  `agentcore_app.py` without the parameter: the AgentCore gateway
+  consumes the presigned URL's query string itself and forwards only
+  its own recognized parameters (qualifier, session id) to the agent,
+  not arbitrary ones. **The tenant-selection channel must therefore
+  change** — see the new Open Question below. Not decided inline, per
+  `ai-workflow-rules.md` -> Handling Missing Requirements.
+
+- ~~**How does the browser tell the deployed `/ws` which clinic the call
+  is for, now that the query-string channel is known not to work?**~~
+  **Resolved (2026-09-13): the first WebSocket message.** The browser
+  sends `{"clinic_id": ...}` as its first frame and
+  `agentcore_app.py` reads-and-validates it after `accept()` —
+  implemented on both ends, deployed, and proven live by the probe
+  (the handshake is accepted and the call connects). The choice is
+  still the browser's, never spoken, and still fixed once read; the
+  read moved from before `accept()` to after it, which the module
+  docstring now explains.
+
+- **SES sandbox recipients** — seeded patient addresses are
+  `@example.com`, so reminder emails will be `MessageRejected` until
+  the recipients are verified or the account leaves the SES sandbox.
+  Blocks end-to-end reminder testing, not reminder code.
+
 ## Architecture Decisions
 
 - **Multi-agent via Agent-as-Tool, not remote/A2A agents** — chosen
@@ -2881,6 +2958,75 @@ accordingly.
   parameter change once Next Up #2's UI item picks a domain.
 
 ## Session Notes
+
+- **The greeting silence: Nova Sonic does not answer the opening text
+  turn (2026-09-13, diagnosis in progress).** After the handshake
+  protocol was deployed, the end-to-end probe (`frontend/
+  probe-handshake.mjs`) proved the whole wire chain — credentials,
+  presign, socket, handshake, a real Nova Sonic connection — but no
+  transcript or audio ever came back (output tokens pinned at 0 over
+  45s). Reproduced **locally** with `backend/scratch_text_turn.py`
+  against the real model (no container involved), so the deployed
+  container is healthy and the bug is in what we send:
+  1. A bare interactive text turn (`OPENING_TURN` →
+     `contentStart(TEXT, USER, interactive=true)` + `textInput` +
+     `contentEnd`) is *accepted* — input tokens grow — but the model
+     never responds. This exactly matches the deployed behavior.
+  2. A 200ms silence audio chunk followed by closing the audio
+     container (turn end) *also* produced no output (150 speech
+     input tokens, output still 0) — though only silence was sent, so
+     endpointing on zero speech may legitimately see no turn to
+     answer.
+  **Not the cause:** the two `Traceback` events in the runtime log
+  group are an `awscrt` `InvalidStateError` fired during teardown
+  when the probe's timeout closed the socket — a red herring.
+  **Where to resume:** the open question is what provokes Nova
+  Sonic's first output turn. Candidates: real speech audio (test with
+  an actual spoken utterance, not silence); a longer/real audio turn
+  followed by text; or dropping the proactive greeting and letting
+  the browser play a canned greeting while the agent waits for the
+  patient's first speech (the vendored sample never greets — the
+  caller speaks first, and `Greeting` was only ever tested against
+  the fake model). Nova 2 docs describe interactive text as
+  "cross-modal input … during an active voice session", which hints
+  text may not provoke output before any audio exists. Test by
+  editing `backend/scratch_text_turn.py` (scratch, untracked — not
+  app code) and rerunning; verify the deployed path with
+  `frontend/probe-handshake.mjs` (also scratch, untracked) after any
+  `agentcore_app.py`/`voice.py` change and Agent-stack redeploy.
+
+- **Two live-deploy facts about the patient guest voice path
+  (2026-09-13), both verified against the deployed stacks, both fixed
+  in `api_stack.py` and deployed:**
+  1. *`grant_invoke_runtime` does not cover the WebSocket action.* The
+     browser voice path presigns the runtime's `wss` `/ws` URL, which
+     the service authorizes as
+     `bedrock-agentcore:InvokeAgentRuntimeWithWebSocketStream` — a
+     separate action the AgentCore L2 has no grant method for. The
+     presigned URL returned 403 "no identity-based policy allows
+     InvokeAgentRuntimeWithWebSocketStream" until an explicit
+     `iam.PolicyStatement` was added to the guest role. Note the
+     service rewrites the resource to `<runtime-arn>/runtime-endpoint/
+     <qualifier>` when authorizing, so the statement must cover the
+     runtime's subtree (`<arn>` + `<arn>/*`), the same shape the L2's
+     own grant uses.
+  2. *Enhanced-flow Cognito credentials can never invoke AgentCore.*
+     `GetCredentialsForIdentity` (enhanced flow) applies an
+     unauthenticated **scope-down session policy** whose service
+     allow-list (lambda, dynamodb, s3, polly, lex, execute-api, …)
+     does not include bedrock-agentcore — the effective permissions
+     are the intersection of role policy and session policy, so no
+     role policy can grant it (Amazon Cognito Developer Guide ->
+     IAM roles -> "Services that unauthenticated users can access").
+     Observed live as 403 "no session policy allows
+     InvokeAgentRuntimeWithWebSocketStream" *with a correct role
+     policy attached*. The fix is the **basic (classic) auth flow**:
+     the browser calls `GetOpenIdToken` (anonymous) then STS
+     `AssumeRoleWithWebIdentity` against the guest role itself, which
+     applies only the role's own policy. `api_stack.py` now exports
+     `PatientGuestRoleArn` for exactly that call, and
+     `frontend/src/voice/lib/guestCredentials.ts` implements the flow
+     with `@aws-sdk/client-sts`.
 
 - **A Bedrock Knowledge Base's embedding model cannot be changed in
   place.** `AWS::Bedrock::KnowledgeBase` lists

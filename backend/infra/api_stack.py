@@ -66,13 +66,17 @@ Completed); this stack only wires them up:
     (`architecture.md` -> Invariants #5), so it is its own
     `CfnIdentityPool` with its own role attachment, not a second client on
     the staff pool.
-    The guest role gets exactly one grant: `runtime.grant_invoke_runtime`
-    on the AgentCore Runtime this stack is handed, which is the L2
-    construct's own scoped-`bedrock-agentcore:InvokeAgentRuntime` grant
-    (not the broader `grant_invoke`, which also grants
-    `InvokeAgentRuntimeForUser` -- a per-user on-behalf-of header this
-    build never sets). No DynamoDB, S3, or Bedrock-model grant is ever
-    added to this role: every data path stays behind the agent
+    The guest role gets exactly two grants, both scoped to the single
+    AgentCore Runtime this stack is handed and nothing else:
+    `runtime.grant_invoke_runtime` (the L2 construct's own scoped
+    `bedrock-agentcore:InvokeAgentRuntime` grant, not the broader
+    `grant_invoke`, which also grants `InvokeAgentRuntimeForUser` -- a
+    per-user on-behalf-of header this build never sets) and the
+    `bedrock-agentcore:InvokeAgentRuntimeWithWebSocketStream` statement
+    in `_build_patient_guest_identity` (the browser's voice path
+    presigns the runtime's WebSocket URL, a separate action the L2 has
+    no grant method for). No DynamoDB, S3, or Bedrock-model grant is
+    ever added to this role: every data path stays behind the agent
     (`architecture.md` -> Invariants #5), which is what makes a role
     "handed to every visitor" safe to hand to every visitor.
 
@@ -354,11 +358,32 @@ class ApiStack(Stack):
             ),
         )
 
-        # The only grant this role ever gets. `architecture.md` ->
+        # The only grants this role ever gets. `architecture.md` ->
         # Invariants #5: a role handed to every anonymous visitor must
         # reach nothing but the agent runtime -- no DynamoDB, S3, or
         # Bedrock-model grant belongs here, ever.
         agent_runtime.grant_invoke_runtime(guest_role)
+        # The L2's `grant_invoke_runtime` covers only the plain
+        # `InvokeAgentRuntime` HTTP action; the browser's voice path
+        # presigns the runtime's **WebSocket** URL, which the service
+        # authorizes as a separate action the construct has no grant
+        # method for (verified against a live deploy: the presigned
+        # `wss` URL returns 403 "no identity-based policy allows
+        # InvokeAgentRuntimeWithWebSocketStream" on the guest role).
+        # The service rewrites the resource to
+        # `<runtime-arn>/runtime-endpoint/<qualifier>` when authorizing
+        # (observed: `/runtime-endpoint/DEFAULT`), so the statement
+        # covers the runtime's subtree -- the same shape the L2's own
+        # grant uses (`<arn>` plus `<arn>/*`), still one runtime only.
+        guest_role.add_to_principal_policy(
+            iam.PolicyStatement(
+                actions=["bedrock-agentcore:InvokeAgentRuntimeWithWebSocketStream"],
+                resources=[
+                    agent_runtime.agent_runtime_arn,
+                    f"{agent_runtime.agent_runtime_arn}/*",
+                ],
+            )
+        )
 
         cognito.CfnIdentityPoolRoleAttachment(
             self,
@@ -376,6 +401,26 @@ class ApiStack(Stack):
                 "AWS credentials to presign the AgentCore WebSocket."
             ),
             export_name=f"{self.config.resource_name('patient-guest-identity')}-id",
+        )
+        # The basic (classic) auth flow needs the role ARN itself: the
+        # frontend calls STS AssumeRoleWithWebIdentity directly with the
+        # Cognito-issued OIDC token. It cannot use the enhanced flow
+        # (GetCredentialsForIdentity) because Cognito applies an
+        # unauthenticated scope-down session policy to enhanced-flow
+        # guests whose service allow-list does not include
+        # bedrock-agentcore (Amazon Cognito Developer Guide -> IAM
+        # roles -> "Services that unauthenticated users can access") --
+        # verified against this deploy as a 403 "no session policy
+        # allows InvokeAgentRuntimeWithWebSocketStream".
+        CfnOutput(
+            self,
+            "PatientGuestRoleArn",
+            value=guest_role.role_arn,
+            description=(
+                "IAM role the voice UI's basic-flow STS "
+                "AssumeRoleWithWebIdentity call targets."
+            ),
+            export_name=f"{self.config.resource_name('patient-guest')}-arn",
         )
 
         return identity_pool, guest_role
