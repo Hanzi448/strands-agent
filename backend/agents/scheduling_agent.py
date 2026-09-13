@@ -37,6 +37,7 @@ from strands.models.model import Model
 from strands.tools.decorator import DecoratedFunctionTool
 
 from tools import appointments, booking, scheduling
+from tools.schema import PatientAttrs
 
 from .results import call
 from .session import ClinicSession
@@ -83,6 +84,25 @@ How to work:
 - Confirm what you actually did, once it is done -- the service, the day and
   the local time. Never say an appointment is booked, moved or cancelled
   before the tool that does it has returned successfully."""
+
+
+def _note_patient(session: ClinicSession, result: Any) -> None:
+    """Tell the session who the call turned out to be, if a tool learned it.
+
+    The booking, moving and cancelling results carry a `patient`
+    summary; `ClinicSession.note_patient` keeps the first one and
+    ignores the rest. Kept here rather than in `backend/tools/`
+    because it is the *session* being told, and the tool layer knows
+    nothing about sessions (`architecture.md` -> System Boundaries).
+    """
+    if not isinstance(result, dict):
+        return
+    patient = result.get("patient")
+    if not isinstance(patient, dict):
+        return
+    patient_id = patient.get(PatientAttrs.PATIENT_ID)
+    if isinstance(patient_id, str) and patient_id.strip():
+        session.note_patient(patient_id)
 
 
 def scheduling_tools(session: ClinicSession) -> list[DecoratedFunctionTool]:
@@ -191,7 +211,7 @@ def scheduling_tools(session: ClinicSession) -> list[DecoratedFunctionTool]:
             A refusal names times that are still free that day, so you
             can offer one immediately instead of starting over.
         """
-        return call(
+        result = call(
             "book_appointment",
             booking.book_appointment,
             clinic_id=clinic_id,
@@ -202,6 +222,8 @@ def scheduling_tools(session: ClinicSession) -> list[DecoratedFunctionTool]:
             patient_email=patient_email,
             notes=notes,
         )
+        _note_patient(session, result)
+        return result
 
     @tool(name="reschedule_appointment")
     def reschedule_appointment(
@@ -241,7 +263,7 @@ def scheduling_tools(session: ClinicSession) -> list[DecoratedFunctionTool]:
             `local_end` -- plus `previous` with the same fields for where
             it was, so you can confirm the move in full.
         """
-        return call(
+        result = call(
             "reschedule_appointment",
             appointments.reschedule_appointment,
             clinic_id=clinic_id,
@@ -251,6 +273,8 @@ def scheduling_tools(session: ClinicSession) -> list[DecoratedFunctionTool]:
             appointment_id=appointment_id,
             reason=reason,
         )
+        _note_patient(session, result)
+        return result
 
     @tool(name="cancel_appointment")
     def cancel_appointment(
@@ -284,7 +308,7 @@ def scheduling_tools(session: ClinicSession) -> list[DecoratedFunctionTool]:
             `local_start` and `local_end` -- so you can read back what
             was called off as confirmation.
         """
-        return call(
+        result = call(
             "cancel_appointment",
             appointments.cancel_appointment,
             clinic_id=clinic_id,
@@ -293,6 +317,8 @@ def scheduling_tools(session: ClinicSession) -> list[DecoratedFunctionTool]:
             appointment_id=appointment_id,
             reason=reason,
         )
+        _note_patient(session, result)
+        return result
 
     return [
         check_availability,

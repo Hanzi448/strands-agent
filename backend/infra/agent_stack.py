@@ -116,6 +116,22 @@ EMBEDDING_DIMENSIONS = 1024
 # disagrees with `faq.KB_ID_ENV_PREFIX`.
 KB_ID_ENV_PREFIX = "CLINICPILOT_KB_ID_"
 
+# Duplicated from `agents/memory.py`, not imported: same tradeoff as
+# `KB_ID_ENV_PREFIX` above -- this stack needs `aws-cdk-lib`, which the
+# agent code's virtual environment does not install, and the two run
+# apart (`architecture.md` -> System Boundaries).
+# `tests/test_schema_matches_infra.py` fails if this ever disagrees with
+# `memory.MEMORY_ID_ENV`.
+MEMORY_ID_ENV = "CLINICPILOT_MEMORY_ID"
+
+# The namespace the SUMMARIZATION strategy consolidates into. Actor-
+# scoped on purpose: the strategy's default namespace is session-
+# scoped, which would make every call's summary invisible to the next.
+# `{actorId}` is resolved by the AgentCore service; the client-side
+# spelling lives in `agents/memory.py` (`NAMESPACE_TEMPLATE`), and the
+# same test keeps the two from drifting.
+MEMORY_NAMESPACE_TEMPLATE = "/summaries/actors/{actorId}/"
+
 
 def _knowledge_base_id_env_var(clinic_id: str) -> str:
     """`tools.faq.knowledge_base_id_env_var`'s naming rule, duplicated -- see
@@ -136,6 +152,12 @@ _BACKEND_DIR = str(Path(__file__).resolve().parent.parent)
 # the same reason.
 def _runtime_name(config: ProjectConfig) -> str:
     return config.resource_prefix.replace("-", "_") + "_agent_runtime"
+
+
+def _memory_name(config: ProjectConfig) -> str:
+    """Memory names follow the same letters/digits/underscores-only rule
+    as runtime names -- see `_runtime_name`."""
+    return config.resource_prefix.replace("-", "_") + "_memory"
 
 
 def _clinic_slug(clinic_id: str) -> str:
@@ -174,6 +196,10 @@ class AgentStack(Stack):
             kb_id, kb_arn = self._build_clinic_knowledge_base(clinic_id, kb_bucket)
             self.knowledge_base_ids[clinic_id] = kb_id
             self.knowledge_base_arns[clinic_id] = kb_arn
+
+        # Before the runtime: it is both an env value the container reads
+        # and a grant target for the runtime's role.
+        self.memory = self._build_patient_memory()
 
         self.runtime = self._build_agent_runtime(
             clinics_table=clinics_table,
@@ -296,6 +322,35 @@ class AgentStack(Stack):
         )
 
         return knowledge_base.attr_knowledge_base_id, knowledge_base.attr_knowledge_base_arn
+
+    def _build_patient_memory(self) -> agentcore.Memory:
+        """Provision the AgentCore Memory holding each patient's summary.
+
+        One memory resource for the whole project, one SUMMARIZATION
+        strategy writing into an actor-scoped namespace: `{clinic_id}#
+        {patient_id}` is the actor (`agents/memory.py` -> `actor_id`),
+        so a patient's rolling summary accumulates across calls and is
+        unreachable from another clinic's session by construction
+        (`architecture.md` -> Invariants #1). The runtime's grants and
+        env var are the only wiring this stack adds; the read and write
+        paths themselves live in the agent code.
+        """
+        return agentcore.Memory(
+            self,
+            "PatientMemory",
+            memory_name=_memory_name(self.config),
+            description=(
+                "One rolling summary per patient, across ClinicPilot"
+                " voice calls."
+            ),
+            memory_strategies=[
+                agentcore.ManagedMemoryStrategy(
+                    agentcore.MemoryStrategyType.SUMMARIZATION,
+                    strategy_name="patient_call_summaries",
+                    namespaces=[MEMORY_NAMESPACE_TEMPLATE],
+                )
+            ],
+        )
 
     def _build_agent_runtime(
         self,
@@ -450,6 +505,14 @@ class AgentStack(Stack):
             )
         )
 
+        # Read (retrieve a patient's summary mid-call) and write (record
+        # the call's turns at hang-up) on the one memory resource -- the
+        # L2's own grants, so the action list is the construct's to keep
+        # correct. `agents/memory.py` is the only code that makes these
+        # calls, and it makes exactly these two.
+        self.memory.grant_read(runtime)
+        self.memory.grant_write(runtime)
+
         CfnOutput(
             self,
             "AgentRuntimeArn",
@@ -463,13 +526,14 @@ class AgentStack(Stack):
     def _runtime_environment(self) -> dict[str, str]:
         """Environment variables the deployed container reads on start.
 
-        Deployment *facts* only -- which table, which Knowledge Base --
-        never a product decision. The text/voice model ids
-        (`orchestrator.TEXT_MODEL_ENV`, `voice.VOICE_MODEL_ENV`,
-        `voice.VOICE_ID_ENV`) are deliberately absent: each is an open
-        question in `progress-tracker.md`, and leaving them unset is what
-        already lets the Strands/Nova Sonic default stand without
-        blocking on the answer (see those modules' own docstrings).
+        Deployment *facts* only -- which table, which Knowledge Base,
+        which memory resource -- never a product decision. The
+        text/voice model ids (`orchestrator.TEXT_MODEL_ENV`,
+        `voice.VOICE_MODEL_ENV`, `voice.VOICE_ID_ENV`) are deliberately
+        absent: each is an open question in `progress-tracker.md`, and
+        leaving them unset is what already lets the Strands/Nova Sonic
+        default stand without blocking on the answer (see those
+        modules' own docstrings).
         """
         env = {
             # `tools/dynamo.table_name`'s fallback naming scheme needs only
@@ -488,6 +552,10 @@ class AgentStack(Stack):
             # sends no email, so this is an enable, not a dependency.
             "CLINICPILOT_ESCALATION_SENDER_EMAIL": VERIFIED_SES_ADDRESS,
             "CLINICPILOT_ESCALATION_RECIPIENT_EMAIL": VERIFIED_SES_ADDRESS,
+            # `agents/memory.py`'s enable: the deployed AgentCore Memory
+            # resource id. The read and write paths are no-ops without
+            # it, so local development never needs it set.
+            MEMORY_ID_ENV: self.memory.memory_id,
         }
         for clinic_id, kb_id in self.knowledge_base_ids.items():
             env[_knowledge_base_id_env_var(clinic_id)] = kb_id

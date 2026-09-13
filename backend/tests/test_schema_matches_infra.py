@@ -141,6 +141,50 @@ def test_kb_id_env_prefix_matches_the_agent_stack() -> None:
     )
 
 
+def test_memory_id_env_var_matches_the_agent_stack() -> None:
+    """The env var `agent_stack.py` sets must be the one `agents/memory.py`
+    reads -- the same duplicated-constant discipline `KB_ID_ENV_PREFIX`
+    already follows. A drift here would mean the runtime injects a memory
+    id the agent code never looks for, and memory silently stays off in
+    the deployed container while every offline test passes.
+    """
+    from agents import memory
+
+    agent_stack_constants = _module_level_strings(AGENT_STACK_PATH)
+    assert "MEMORY_ID_ENV" in agent_stack_constants, (
+        f"MEMORY_ID_ENV is defined in agents/memory.py but no longer in "
+        f"{AGENT_STACK_PATH.name}."
+    )
+    assert agent_stack_constants["MEMORY_ID_ENV"] == memory.MEMORY_ID_ENV, (
+        "MEMORY_ID_ENV disagrees between agents/memory.py and "
+        f"{AGENT_STACK_PATH.name}: {memory.MEMORY_ID_ENV!r} vs "
+        f"{agent_stack_constants['MEMORY_ID_ENV']!r}."
+    )
+
+
+def test_memory_namespace_template_matches_the_agent_stack() -> None:
+    """The namespace the strategy writes to (CDK, `{actorId}` resolved by
+    the service) and the namespace the runtime retrieves from
+    (`agents/memory.py`, `{actor_id}` filled client-side) must be the
+    same path shape, or summaries land where retrieval never looks --
+    every caller a first-time caller, forever, with no error anywhere.
+    """
+    from agents import memory
+
+    agent_stack_constants = _module_level_strings(AGENT_STACK_PATH)
+    assert "MEMORY_NAMESPACE_TEMPLATE" in agent_stack_constants, (
+        f"MEMORY_NAMESPACE_TEMPLATE is defined in agents/memory.py but no"
+        f" longer in {AGENT_STACK_PATH.name}."
+    )
+    assert agent_stack_constants["MEMORY_NAMESPACE_TEMPLATE"].replace(
+        "{actorId}", "{actor_id}"
+    ) == memory.NAMESPACE_TEMPLATE, (
+        "MEMORY_NAMESPACE_TEMPLATE disagrees between agents/memory.py and"
+        f" {AGENT_STACK_PATH.name}: {memory.NAMESPACE_TEMPLATE!r} vs"
+        f" {agent_stack_constants['MEMORY_NAMESPACE_TEMPLATE']!r}."
+    )
+
+
 def test_kb_bucket_prefix_matches_the_data_stack() -> None:
     """`seed/aws_io.py` duplicates `data_stack.py`'s `KB_BUCKET_PREFIX` for
     the same reason this file's other tests exist: `seed/` cannot import

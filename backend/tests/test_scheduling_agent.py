@@ -48,6 +48,7 @@ from tests.test_appointments import (
     NINE,
     NINE_FIFTEEN,
     NOW,
+    PATIENT_ID,
     PHONE,
     FakeAppointmentStore,
     booked,
@@ -595,3 +596,71 @@ def test_a_session_for_the_other_clinic_is_a_different_assistant(tables) -> None
     scheduling_agent_tool(cosmetic_session(), model)(request="anything on Wednesday?")
     assert clinics.requested == [{"clinic_id": COSMETIC_ID}]
     assert "Lumiere Aesthetics" in model.requests[0]["system_prompt"]
+
+
+# --------------------------------------------------------------------------
+# The wrappers tell the session who the patient is
+# --------------------------------------------------------------------------
+
+
+def test_a_booking_identifies_the_patient_on_the_session(tables) -> None:
+    """The booking result carries a patient_id; the session is where the
+    rest of the call reads it from. This is the single identity
+    mechanism -- no phone-number lookup is invented for memory's sake."""
+    tables()
+    session = dental_session()
+    result = tool_named(session, "book_appointment")(
+        starts_at="2026-07-01T08:00:00Z",
+        service="checkup",
+        patient_name=NAME,
+        patient_phone="555 123 4567",
+    )
+    assert result["status"] == "scheduled"
+    assert session.patient_id == result["patient"]["patient_id"]
+
+
+def test_rescheduling_identifies_the_patient_the_same_way(tables) -> None:
+    tables(appointment_items=one_checkup(), patient_items=[patient()])
+    session = dental_session()
+    tool_named(session, "reschedule_appointment")(
+        patient_phone=PHONE,
+        patient_name=NAME,
+        new_starts_at=TEN,
+    )
+    assert session.patient_id == PATIENT_ID
+
+
+def test_cancelling_identifies_the_patient_the_same_way(tables) -> None:
+    tables(appointment_items=one_checkup(), patient_items=[patient()])
+    session = dental_session()
+    tool_named(session, "cancel_appointment")(
+        patient_phone=PHONE, patient_name=NAME
+    )
+    assert session.patient_id == PATIENT_ID
+
+
+def test_checking_availability_identifies_nobody(tables) -> None:
+    """No patient in the result, no identity on the session -- a caller
+    who only asks about times stays anonymous, and memory records
+    nothing for them."""
+    tables()
+    session = dental_session()
+    tool_named(session, "check_availability")(
+        date=WEDNESDAY, service="checkup"
+    )
+    assert session.patient_id is None
+
+
+def test_a_refused_booking_still_identifies_nobody(tables) -> None:
+    """A refusal carries no patient summary, and the session must not
+    invent one: memory records nothing for a call that booked nothing."""
+    tables(appointment_items=one_checkup())
+    session = dental_session()
+    result = tool_named(session, "book_appointment")(
+        starts_at=NINE,
+        service="checkup",
+        patient_name="Kit Rowe",
+        patient_phone="555 999 0000",
+    )
+    assert result["status"] == "error"
+    assert session.patient_id is None

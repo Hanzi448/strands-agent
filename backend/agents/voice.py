@@ -64,6 +64,7 @@ import asyncio
 import base64
 import os
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Final, NoReturn
 
 from strands.experimental.bidi import BidiAgent
@@ -72,6 +73,7 @@ from strands.experimental.bidi.types.events import BidiAudioInputEvent
 from strands.experimental.bidi.types.io import BidiInput
 from strands.models.model import Model
 
+from . import memory
 from .orchestrator import (
     OPENING_TURN,
     ORCHESTRATOR_SYSTEM_PROMPT,
@@ -129,6 +131,17 @@ names, phone numbers and dates more than anything else:
   a number or a day you only half heard.
 - The patient can speak over you. If they do, stop and listen: what they say
   then is the next thing to answer, not an interruption to talk through."""
+
+# How the retrieved summary is handed to the running conversation: a
+# stage direction in the same register as `OPENING_TURN` -- context the
+# model may use, not a turn it must answer. The model is told not to
+# mention it because a patient who hears "as we discussed last time"
+# from a summary they never saw is a patient who stops trusting the
+# front desk.
+MEMORY_CONTEXT_TEMPLATE: Final[str] = (
+    "Context from this patient's previous calls: {summary}."
+    " Use it if relevant; do not mention that you were given it."
+)
 
 
 def voice_system_prompt(session: ClinicSession) -> str:
@@ -242,12 +255,27 @@ def build_voice_agent(
     )
 
 
+@dataclass(frozen=True)
+class VoiceCall:
+    """One opened voice call: the agent, and the session underneath it.
+
+    The interfaces that drive a call need both -- the agent to run, the
+    session to wire the memory channels (`MemoryContext` subscribes to
+    it, `record_call_end` reads it) -- and this is the one object that
+    has both without any caller rebuilding a `ClinicSession` by hand
+    and skipping the checks `ClinicSession.start` runs.
+    """
+
+    agent: BidiAgent
+    session: ClinicSession
+
+
 def start_voice_call(
     clinic_id: str,
     *,
     voice_model: BidiModel | str | None = None,
     text_model: Model | str | None = None,
-) -> BidiAgent:
+) -> VoiceCall:
     """Open a voice call: read the clinic, then build its front desk.
 
     The voice counterpart of `orchestrator.start_call`, and the single
@@ -265,18 +293,21 @@ def start_voice_call(
         text_model: Passed to `build_voice_agent`.
 
     Returns:
-        A fresh `BidiAgent` for this call, holding no conversation yet and
-        with no connection open.
+        A `VoiceCall`: a fresh `BidiAgent` for this call, holding no
+        conversation yet and with no connection open, and the
+        `ClinicSession` it is pinned to.
 
     Raises:
         ValidationError: If `clinic_id` is missing or malformed.
         NotFoundError: If no clinic exists with that id.
         ConfigurationError: If the clinic's stored config is unusable.
     """
-    return build_voice_agent(
-        ClinicSession.start(clinic_id),
-        voice_model=voice_model,
-        text_model=text_model,
+    session = ClinicSession.start(clinic_id)
+    return VoiceCall(
+        agent=build_voice_agent(
+            session, voice_model=voice_model, text_model=text_model
+        ),
+        session=session,
     )
 
 
@@ -377,6 +408,76 @@ class Greeting(BidiInput):
         Raises:
             asyncio.CancelledError: Always, once the call is over.
         """
+        await self._finished.wait()
+        raise asyncio.CancelledError
+
+
+class MemoryContext(BidiInput):
+    """Send a returning patient's summary into the call, once.
+
+    An input *channel* for the same reason `Greeting` is one:
+    `BidiAgent.run` owns the connection and pumps every channel on the
+    event loop, and this channel has something to say only after the
+    tool layer identifies the patient -- which happens on a worker
+    thread, mid-call. So `start` subscribes to the session's identity
+    event and bridges the thread onto the loop; `__call__` waits for
+    that, retrieves the summary *off* the loop (a network call the
+    patient would otherwise hear as a pause), and sends it with the
+    same `agent.send` mechanism the greeting uses.
+
+    Says nothing at all when the patient is never identified, when
+    memory is disabled, or when no summary exists -- a first-time
+    caller's call is byte-for-byte the call memory would not have been
+    part of. At most one injection per call: the session's event fires
+    at most once, and this channel then blocks like `Greeting` does.
+    """
+
+    def __init__(self, session: ClinicSession) -> None:
+        """Initialise the channel.
+
+        Args:
+            session: The call's session. Its identity event is what
+                this channel waits for, and its clinic is half of the
+                memory actor.
+        """
+        self._session = session
+        self._identified = asyncio.Event()
+        self._finished = asyncio.Event()
+        self._agent: BidiAgent | None = None
+
+    async def start(self, agent: BidiAgent) -> None:
+        """Subscribe to the session's identity event on this loop."""
+        self._agent = agent
+        loop = asyncio.get_running_loop()
+        self._session.on_patient_identified(
+            # The tool wrappers run on worker threads; the event they
+            # fire must cross onto this loop before anything here
+            # reacts to it.
+            lambda _patient_id: loop.call_soon_threadsafe(self._identified.set)
+        )
+
+    async def stop(self) -> None:
+        """Release the pump task waiting on this channel."""
+        self._finished.set()
+
+    async def __call__(self) -> NoReturn:
+        """Wait for the identity, then say the one thing there is to say.
+
+        Raises:
+            asyncio.CancelledError: Always, once the call is over --
+                the same contract `Greeting`'s own `__call__` holds.
+        """
+        await self._identified.wait()
+        # Off the loop: this is a network call, and the patient's audio
+        # is being pumped on this thread.
+        summary = await asyncio.to_thread(
+            memory.retrieve_summary,
+            memory.actor_id(
+                self._session.clinic_id, self._session.patient_id or ""
+            ),
+        )
+        if summary and self._agent is not None:
+            await self._agent.send(MEMORY_CONTEXT_TEMPLATE.format(summary=summary))
         await self._finished.wait()
         raise asyncio.CancelledError
 

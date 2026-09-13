@@ -85,13 +85,16 @@ from strands.experimental.bidi.types.io import BidiInput, BidiOutput
 
 from tools.errors import ToolError
 
+from .memory import TranscriptCollector, record_call_end
 from .orchestrator import TEXT_MODEL_ENV
+from .session import ClinicSession
 from .voice import (
     DEFAULT_VOICE_REGION,
     VOICE_ID_ENV,
     VOICE_MODEL_ENV,
     VOICE_REGION_ENV,
     Greeting,
+    MemoryContext,
     build_nova_sonic_model,
     start_voice_call,
 )
@@ -449,6 +452,7 @@ def build_audio_io() -> BidiAudioIO:
 async def run_call(
     agent: BidiAgent,
     *,
+    session: ClinicSession,
     audio: AudioChannels,
     writer: TextIO,
     greeting: bool = True,
@@ -460,6 +464,9 @@ async def run_call(
         agent: The call's voice agent, from `start_voice_call`. Built once
             and kept, because like its typed counterpart it is where the
             conversation accumulates.
+        session: The call's session -- what the memory channels key on.
+            The same session the agent was built from, so the patient
+            memory records is the patient the tools resolved.
         audio: Where the patient is heard and the agent is played.
         writer: Where the monitor prints the call.
         greeting: Whether to prompt the agent to speak first. `False`
@@ -468,14 +475,26 @@ async def run_call(
         verbose: Passed to the monitor.
     """
     silence = Silence()
+    collector = TranscriptCollector()
     inputs: list[BidiInput] = [audio.input()]
     if greeting:
         inputs.append(Greeting(on_start=lambda: silence.mark(GREETING_LABEL)))
+    # The memory channel says nothing unless the call identifies the
+    # patient and a summary exists, so it costs an idle task when
+    # memory is off -- not a branch in every interface.
+    inputs.append(MemoryContext(session))
     outputs: list[BidiOutput] = [
         audio.output(),
         CallMonitor(silence, writer, verbose=verbose),
+        collector,
     ]
     await agent.run(inputs=inputs, outputs=outputs)
+    # The call is over: record what was said, best-effort. A failure
+    # here is logged, never raised into the operator's exit path.
+    try:
+        record_call_end(session, collector.turns)
+    except Exception:
+        logger.warning("recording the call failed", exc_info=True)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -513,7 +532,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         # Reads the clinic row, so a missing profile, a wrong region or an
         # unseeded table fails here -- before the microphone is open and
         # while there is still somewhere to report it.
-        agent = start_voice_call(
+        call = start_voice_call(
             options.clinic_id,
             voice_model=voice_model,
             text_model=options.text_model,
@@ -538,7 +557,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         asyncio.run(
             run_call(
-                agent,
+                call.agent,
+                session=call.session,
                 audio=audio,
                 writer=sys.stdout,
                 greeting=options.greeting,

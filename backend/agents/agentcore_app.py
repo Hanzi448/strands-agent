@@ -70,6 +70,7 @@ says the deployed path "never opens a sound card."
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import time
@@ -79,8 +80,9 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
 from tools.errors import ToolError
 
+from .memory import TranscriptCollector, record_call_end
 from .orchestrator import TEXT_MODEL_ENV
-from .voice import Greeting, start_voice_call
+from .voice import Greeting, MemoryContext, start_voice_call
 
 logger = logging.getLogger(__name__)
 
@@ -128,7 +130,7 @@ async def voice_session(websocket: WebSocket) -> None:
         return
 
     try:
-        agent = start_voice_call(clinic_id, text_model=_from_env(TEXT_MODEL_ENV))
+        call = start_voice_call(clinic_id, text_model=_from_env(TEXT_MODEL_ENV))
     except ToolError as error:
         logger.warning(
             "call for %r refused at the handshake: %s", clinic_id, error.message
@@ -141,10 +143,11 @@ async def voice_session(websocket: WebSocket) -> None:
         return
 
     logger.info("call for %r connected", clinic_id)
+    collector = TranscriptCollector()
     try:
-        await agent.run(
-            inputs=[websocket.receive_json, Greeting()],
-            outputs=[websocket.send_json],
+        await call.agent.run(
+            inputs=[websocket.receive_json, Greeting(), MemoryContext(call.session)],
+            outputs=[websocket.send_json, collector],
         )
     except WebSocketDisconnect as error:
         logger.info(
@@ -155,12 +158,18 @@ async def voice_session(websocket: WebSocket) -> None:
     except Exception:
         logger.exception("call for %r ended unexpectedly", clinic_id)
     finally:
-        # A failure here is a teardown failure, not a call failure: the
-        # model's own connection is already stopped by `run`'s own
-        # `finally` either way. Broad and swallowed on purpose -- a socket
-        # whose transport is already gone can fail this in ways no
-        # in-process test can produce, and none of them should crash the
-        # connection's task over a step that has nothing left to do.
+        # The call is over: record what was said, off the event loop and
+        # best-effort, before the handler gives the thread back. A
+        # failure is logged inside `record_call_end`, never raised here
+        # -- teardown must not fail a call that already happened.
+        await asyncio.to_thread(record_call_end, call.session, collector.turns)
+        # A failure below this line is a teardown failure, not a call
+        # failure: the model's own connection is already stopped by
+        # `run`'s own `finally` either way. Broad and swallowed on
+        # purpose -- a socket whose transport is already gone can fail
+        # this in ways no in-process test can produce, and none of them
+        # should crash the connection's task over a step that has
+        # nothing left to do.
         try:
             await websocket.close()
         except Exception:

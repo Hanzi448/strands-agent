@@ -69,6 +69,7 @@ from agents.mic import (
     run_call,
 )
 from agents.orchestrator import OPENING_TURN, TEXT_MODEL_ENV
+from agents.session import ClinicSession
 from agents.voice import (
     DEFAULT_VOICE_REGION,
     VOICE_ID_ENV,
@@ -199,15 +200,18 @@ def drive(
     *turns: tuple[str, Any],
     greeting: bool = True,
     verbose: bool = False,
+    session: ClinicSession | None = None,
 ) -> tuple[HangingUpBidiModel, str]:
     """Run one whole call over `run_call` and return the model and output."""
     model = HangingUpBidiModel(*turns)
-    agent = build_voice_agent(dental_session(), voice_model=model)
+    session = session or dental_session()
+    agent = build_voice_agent(session, voice_model=model)
     writer = io.StringIO()
     asyncio.run(
         asyncio.wait_for(
             run_call(
                 agent,
+                session=session,
                 audio=audio,
                 writer=writer,
                 greeting=greeting,
@@ -591,6 +595,84 @@ def test_the_call_is_watched_from_the_moment_it_closes(
     tables()
     _, printed = drive(FakeAudioIO(), ("say", "Bright Smile Dental."))
     assert "closed (user_request)" in printed
+
+
+# --------------------------------------------------------------------------
+# The call is remembered: recorded at hang-up, best-effort
+# --------------------------------------------------------------------------
+
+
+def test_a_call_that_identified_the_patient_is_recorded_at_hang_up(
+    tables,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When `run` returns the call is over -- that is the moment the
+    collected transcript is handed to memory, under the session that
+    knows which clinic and which patient the call was for."""
+    tables()
+    recorded: list[tuple[ClinicSession, list[tuple[str, str]]]] = []
+
+    def fake_record(
+        session: ClinicSession, turns: list[tuple[str, str]]
+    ) -> bool:
+        recorded.append((session, turns))
+        return True
+
+    monkeypatch.setattr("agents.mic.record_call_end", fake_record)
+    session = dental_session()
+    session.note_patient("pat_one")
+
+    drive(
+        FakeAudioIO("A check-up on Wednesday, please."),
+        ("say", "That is booked for nine o'clock."),
+        session=session,
+    )
+
+    assert recorded == [
+        (session, [("That is booked for nine o'clock.", "assistant")])
+    ]
+
+
+def test_a_call_where_nobody_was_identified_records_nothing(
+    tables,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The wiring hands the call-end path a session with no patient;
+    `record_call_end` itself is what decides that means no recording
+    (pinned in its own suite)."""
+    tables()
+    recorded: list[tuple[ClinicSession, list[tuple[str, str]]]] = []
+    monkeypatch.setattr(
+        "agents.mic.record_call_end",
+        lambda session, turns: recorded.append((session, turns)) or False,
+    )
+    session = dental_session()
+
+    drive(FakeAudioIO("Hello?"), ("say", "Bright Smile Dental, how can I help?"))
+
+    assert len(recorded) == 1
+    assert recorded[0][0].patient_id is None
+
+
+def test_a_recording_failure_does_not_fail_the_hang_up(
+    tables,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Best-effort at the call-end too: memory being unreachable must
+    not turn a completed call into an error exit."""
+    tables()
+
+    def exploding(session: ClinicSession, turns: list[tuple[str, str]]) -> bool:
+        raise AssertionError("record_call_end must swallow its own failures")
+
+    monkeypatch.setattr("agents.mic.record_call_end", exploding)
+    session = dental_session()
+    session.note_patient("pat_one")
+
+    model, output = drive(
+        FakeAudioIO("Hello?"), ("say", "Bright Smile Dental."), session=session
+    )
+    assert "Bright Smile Dental" in output
 
 
 # --------------------------------------------------------------------------

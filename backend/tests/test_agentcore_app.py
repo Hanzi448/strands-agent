@@ -296,3 +296,33 @@ def test_the_clinic_answered_for_is_whichever_the_handshake_names(
     prompt = model.started["system_prompt"]
     assert cosmetic_session().clinic_name in prompt
     assert dental_session().clinic_name not in prompt
+
+
+def test_the_call_is_recorded_when_the_browser_hangs_up(
+    tables,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The deployed path gets the same write wiring the microphone has:
+    when `run` returns -- here, the browser disconnecting -- the
+    collected transcript goes to memory under the call's session."""
+    tables()
+    model = HangingUpBidiModel(("say", "Bright Smile Dental, how can I help?"))
+    _patch_voice_model(monkeypatch, model)
+    recorded: list[Any] = []
+    monkeypatch.setattr(
+        "agents.agentcore_app.record_call_end",
+        lambda session, turns: recorded.append((session, turns)) or False,
+    )
+
+    def call() -> None:
+        with TestClient(app).websocket_connect("/ws") as session:
+            session.send_json({"clinic_id": DENTAL})
+            _collect_until_disconnect(session)
+
+    _with_timeout(call)
+
+    assert len(recorded) == 1
+    ended_session, turns = recorded[0]
+    assert ended_session.clinic_id == DENTAL
+    assert ended_session.patient_id is None  # nobody booked on this call
+    assert ("Bright Smile Dental, how can I help?", "assistant") in turns

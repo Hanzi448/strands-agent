@@ -197,3 +197,57 @@ def test_two_clinics_describe_themselves_differently() -> None:
     assert "Consultation (id: consult), 60 minutes" in text
     assert "Bright Smile Dental" not in text
     assert "Check-up" not in text
+
+
+# --------------------------------------------------------------------------
+# Who the patient turned out to be
+# --------------------------------------------------------------------------
+
+
+def test_a_session_starts_with_no_patient() -> None:
+    """Identity is something the tool layer discovers mid-call, not
+    something a session is born with."""
+    assert dental().patient_id is None
+
+
+def test_a_noted_patient_is_readable_on_the_session() -> None:
+    session = dental()
+    session.note_patient("pat_one")
+    assert session.patient_id == "pat_one"
+
+
+def test_the_first_identity_wins() -> None:
+    """A reschedule after a booking names the same patient; a second,
+    different id must not replace the first -- the call is one person."""
+    session = dental()
+    session.note_patient("pat_one")
+    session.note_patient("pat_two")
+    assert session.patient_id == "pat_one"
+
+
+def test_a_blank_id_is_not_an_identity() -> None:
+    session = dental()
+    session.note_patient("   ")
+    assert session.patient_id is None
+
+
+def test_watchers_fire_exactly_once_with_the_id() -> None:
+    """The memory channel subscribes once and must be released once --
+    a second firing would inject the context twice."""
+    session = dental()
+    seen: list[str] = []
+    session.on_patient_identified(seen.append)
+    session.note_patient("pat_one")
+    session.note_patient("pat_one")
+    assert seen == ["pat_one"]
+
+
+def test_a_watcher_registered_after_identification_is_not_called() -> None:
+    """First identification wins, and has already happened: a late
+    subscriber missed the event, exactly as the at-most-once injection
+    promises."""
+    session = dental()
+    session.note_patient("pat_one")
+    seen: list[str] = []
+    session.on_patient_identified(seen.append)
+    assert seen == []

@@ -20,3 +20,8 @@ tzdata>=2024.1
 # made for `strands-agents[bidi]`, which they don't need either.
 fastapi>=0.115
 uvicorn[standard]>=0.30
+# `agents/memory.py`: the AgentCore Memory client for per-patient call
+# summaries. Imported lazily there, so `tools/` and the Lambda handlers
+# still install without it (`tests/test_boundaries.py` holds that line),
+# but the deployed container needs it present.
+bedrock-agentcore>=1.23

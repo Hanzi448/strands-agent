@@ -26,7 +26,8 @@ the first booking.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from datetime import date as date_type, datetime, timezone
 from typing import Any, Final
 from zoneinfo import ZoneInfo
@@ -42,6 +43,21 @@ from tools.validation import require_clinic_id
 SPOKEN_DATE_FORMAT: Final[str] = "%A, %d %B %Y"
 
 
+@dataclass
+class _PatientIdentity:
+    """The one deliberately mutable corner of a frozen session.
+
+    Who the call turned out to be is discovered mid-call by the tool
+    layer, and who to tell about it is decided after construction -- so
+    both live in this small holder the frozen dataclass owns rather than
+    in rebinding the session itself. Same shape as `voice.Greeting`'s
+    `asyncio.Event`: frozen outside, mutable inside.
+    """
+
+    patient_id: str | None = None
+    watchers: list[Callable[[str], None]] = field(default_factory=list)
+
+
 @dataclass(frozen=True)
 class ClinicSession:
     """One patient conversation, pinned to one clinic.
@@ -53,10 +69,17 @@ class ClinicSession:
             the life of the session: a clinic's hours and services do not
             change mid-call, and re-reading them on every prompt build
             would put a DynamoDB round trip in the voice path.
+        identity: Who the call turned out to be, once a tool result says.
+            Mutable state in a frozen dataclass, held in a private holder
+            so the session itself stays a value two concurrent calls
+            cannot cross-contaminate.
     """
 
     clinic_id: str
     clinic: dict[str, Any]
+    identity: _PatientIdentity = field(
+        default_factory=_PatientIdentity, repr=False, compare=False
+    )
 
     @classmethod
     def start(cls, clinic_id: str) -> ClinicSession:
@@ -157,3 +180,39 @@ class ClinicSession:
     def _clinic_type(self) -> str:
         value = self.clinic.get(ClinicAttrs.CLINIC_TYPE)
         return value.strip() if isinstance(value, str) and value.strip() else "clinic"
+
+    @property
+    def patient_id(self) -> str | None:
+        """The patient the tool layer identified, once it has.
+
+        `None` until a tool result carries one -- an unidentified caller
+        stays `None` for the whole call, and memory records nothing.
+        """
+        return self.identity.patient_id
+
+    def on_patient_identified(self, watcher: Callable[[str], None]) -> None:
+        """Register for the moment the caller becomes a known patient.
+
+        Args:
+            watcher: Called with the patient id, exactly once, from
+                whatever thread the identifying tool ran on. Registering
+                after the identification has already happened calls
+                nothing.
+        """
+        self.identity.watchers.append(watcher)
+
+    def note_patient(self, patient_id: str) -> None:
+        """Record who this call turned out to be, if anyone has yet.
+
+        First non-blank identity wins; later calls do not replace it and
+        do not re-fire the watchers. Blank is not an identity.
+
+        Args:
+            patient_id: The `patient_id` a tool result carried.
+        """
+        patient_id = patient_id.strip()
+        if not patient_id or self.identity.patient_id is not None:
+            return
+        self.identity.patient_id = patient_id
+        for watcher in self.identity.watchers:
+            watcher(patient_id)

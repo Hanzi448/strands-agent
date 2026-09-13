@@ -145,6 +145,20 @@ Update this file after every meaningful implementation change.
   matching scoped SES grant. Both halves verified offline — **781
   tests**, `cdk synth` with both templates inspected. Only the
   redeploy and a real send remain. See Completed.
+- **AgentCore Memory is wired end to end (old Next Up #2).** The front
+  desk now remembers a patient across calls: `agents/memory.py` reads
+  and writes AgentCore Memory summaries keyed by
+  `{clinic_id}#{patient_id}` (tenant isolation by construction), the
+  Scheduling sub-agent's booking results identify the patient on the
+  session, a `MemoryContext` input channel injects the previous-call
+  summary into the conversation once the patient is known, and a
+  `TranscriptCollector` output channel records what was said at hang-up
+  — best-effort on both ends, disabled entirely when
+  `CLINICPILOT_MEMORY_ID` is unset. `agent_stack.py` provisions the
+  Memory resource (SUMMARIZATION strategy, actor-scoped namespace) and
+  grants the runtime read/write on exactly it. Verified offline —
+  **821 tests**, `cdk synth` with the memory resource, env var, and
+  grant inspected. Only the redeploy remains. See Completed.
 
 ## Current Goal
 
@@ -185,6 +199,86 @@ Update this file after every meaningful implementation change.
   see Next Up.
 
 ## Completed
+
+- **AgentCore Memory: per-patient rolling call summaries** (Next Up #2,
+  both halves in one unit per its implementation plan — the plan bundled
+  them deliberately, `docs/superpowers/plans/2026-09-14-agentcore-memory.md`).
+  `architecture.md`'s "the agent remembers the patient across calls"
+  made concrete: a returning patient who booked before is recognised,
+  their previous-call summary is in the conversation before they finish
+  their second sentence, and what was said on this call is written back
+  for the next one. Eight tasks, all TDD, all offline.
+  **The patient is identified by what already identifies them** — a
+  successful booking/reschedule/cancellation result carries the
+  `patient_id` the tool layer itself resolved from phone + name, so
+  `scheduling_agent.py`'s wrappers now `note_patient` on the session
+  from the result (first non-blank wins; `check_availability` never
+  identifies anyone). No new identity surface, nothing a model can
+  assert. `ClinicSession` gained an `identity` holder with
+  `on_patient_identified` watchers, threaded safely from the worker
+  threads Strands runs non-async tools in (`loop.call_soon_threadsafe`).
+  **The memory actor is `{clinic_id}#{patient_id}`** — the same
+  composite as the `by-patient` index — so one clinic's summaries can
+  never be another clinic's retrieval, tenant isolation by construction
+  (Invariants #1). The namespace is deliberately **actor-scoped**
+  (`/summaries/actors/{actorId}/`, CDK spelling, resolved by the
+  service): SUMMARIZATION's default session-scoped namespace would give
+  every call a fresh, empty memory, which is the opposite of the
+  feature. Two constants are duplicated between `agents/memory.py` and
+  `agent_stack.py` (the env-var name and the namespace template) for
+  the same reason `KB_ID_ENV_PREFIX` already is — the CDK app cannot be
+  imported by backend tests — and two new drift-guard tests in
+  `test_schema_matches_infra.py` fail if either pair disagrees,
+  including the `{actorId}`-vs-`{actor_id}` spelling difference.
+  **Memory is best-effort at both ends and off by default.**
+  `MEMORY_ID_ENV` unset or blank means no client is ever constructed
+  and both the read and the write are silent no-ops — the same env-var
+  enable pattern the SES escalation send uses. A failed retrieval
+  returns `None`, a failed write returns `False`, and neither ever
+  raises into a call path: a memory outage must cost the memory, never
+  the call. The retrieval itself runs through `asyncio.to_thread` (a
+  fresh `MemoryClient` per call, lazily imported, behind the `_client()`
+  seam the whole test suite drives).
+  **Read wiring: a `MemoryContext` BidiInput channel** in `voice.py`,
+  added to `run`'s inputs by both `mic.py` and `agentcore_app.py`. It
+  waits for the session's identity event, retrieves the summary,
+  sends one `MEMORY_CONTEXT_TEMPLATE` turn to the agent, and blocks
+  forever (input channels that yield twice would talk over the patient).
+  A first-time caller gets nothing sent; a caller who never books gets
+  nothing sent — the injection happens only when the patient is known,
+  and only once.
+  **Write wiring: a `TranscriptCollector` BidiOutput channel** that
+  keeps final non-blank transcripts on both sides, plus
+  `record_call_end(session, turns)` — no patient identified means
+  nothing is written (an anonymous call has no actor to file under).
+  Both interfaces hang up through the same call: `mic.py` inside its
+  post-`run` teardown, `agentcore_app.py` in its `finally` via
+  `asyncio.to_thread` before the socket closes.
+  **The infra half**: `agent_stack.py` provisions one
+  `agentcore.Memory` (SUMMARIZATION strategy,
+  `patient_call_summaries`), grants the runtime `grant_read` +
+  `grant_write` (verified in the synthesised template: eight
+  bedrock-agentcore actions scoped to the one memory ARN, not `*`), and
+  injects `CLINICPILOT_MEMORY_ID` from `memory.memory_id`.
+  `requirements.txt` gained `bedrock-agentcore>=1.23` (lazy import, so
+  `tools/` and `lambda/` still install without it), and a new
+  `test_boundaries.py` AST guard now enforces that neither package
+  ever imports `strands` or `bedrock_agentcore` — the boundary the
+  existing `tools/` guard drew, extended to `lambda/`.
+  Verified: **821 passed** (781 before, 40 new across seven suites);
+  `npx aws-cdk synth ClinicPilot-Dev-Agent` from `backend/infra` with
+  the template inspected directly — memory resource
+  (`clinicpilot_dev_memory`, the strategy and its namespace), the env
+  var (`Fn::GetAtt PatientMemory/MemoryId`), and the role's grant
+  statements all present and scoped.
+  **One scope-out, deliberate (the spec's cut clause)**: `cli.py` is
+  not wired for memory — only the two voice interfaces are, because
+  the typed CLI is a developer interface and the spec scoped memory to
+  the call paths. A small follow-up unit if ever wanted.
+  **Not verified, and cannot be here**: a real summary surviving
+  between two real calls — it needs the Agent stack redeployed (the
+  memory resource and env var are undeployed, folded into Next Up
+  #3's redeploy) and two live calls with a booking in the first.
 
 - **Escalation email notifications** (old Next Up #2, both halves —
   `project-overview.md`'s "Escalation to staff (email + dashboard)" and
@@ -2462,6 +2556,10 @@ write) and the infra half (the agent runtime role's SES grant plus the
 shared `config.VERIFIED_SES_ADDRESS` both stacks now read). All in
 Completed below; the numbered list is renumbered accordingly.
 
+The old #2 ("AgentCore Memory") has been completed in full — code,
+tests, and CDK, all in one unit per its implementation plan. See
+Completed. The numbered list is renumbered accordingly.
+
 1. **Patient voice UI** — `frontend/src/voice/`: clinic picker, presigned
    WebSocket to the deployed `/ws` (guest identity-pool credentials),
    mic capture + audio playback, live transcript, voice orb.
@@ -2511,14 +2609,11 @@ Completed below; the numbered list is renumbered accordingly.
    **What remains is the human check only**: a real browser session —
    a person listening and speaking, no probe substitutes for hearing
    the agent — with the auto-started mic behind it.
-2. **AgentCore Memory** — session state per `architecture.md`, so the
-   voice agent remembers context across a call (and optionally across
-   calls) without process-level state.
-3. **Settings tab** — editable hours and services (user decision,
+2. **Settings tab** — editable hours and services (user decision,
    2026-09-12): staff edit hours/closures/services in the dashboard,
    writing to the Clinics table. Needs a new authenticated write route
    plus validation — backend unit first, then its frontend half.
-4. Deploy `agentcore_app.py` to the AgentCore Runtime and verify one
+3. Deploy `agentcore_app.py` to the AgentCore Runtime and verify one
    voice session end-to-end. **Status note (2026-09-12): the user
    reports the CDK deploy and seed have now been run and the frontend
    tested locally** — the "blocked in this environment" caveats that
@@ -2530,7 +2625,14 @@ Completed below; the numbered list is renumbered accordingly.
    section before touching the Agent stack. The Agent and Automation
    stacks also now carry the escalation-email SES grant and env vars
    (old #2) undeployed — redeploy both to make escalation emails live.
-5. **Demo video, live demo link, AWS Builder ID / builder.aws.com
+   **Deploy-time note (2026-09-14, AgentCore Memory): the next
+   `cdk deploy ClinicPilot-Dev-Agent` now also creates the memory
+   resource and injects `CLINICPILOT_MEMORY_ID` into the container —
+   the deploy must succeed before that variable exists, so memory is
+   simply off in the container until it does (by design: unset means
+   disabled no-op). The same deploy picks up the escalation-email SES
+   grant, so one Agent-stack deploy covers both.**
+4. **Demo video, live demo link, AWS Builder ID / builder.aws.com
    post.** The architecture diagram and README half of the old #2 is
    done (see Completed) — a root `LICENSE` (MIT) and
    `docs/architecture.md` (a Mermaid system diagram plus a reading
@@ -2541,7 +2643,7 @@ Completed below; the numbered list is renumbered accordingly.
    submission checklist. The hosting stack's code is done too (the
    old #3, see Completed); what remains of this item is deploying it
    per the README's "Deploying" section for the live demo link
-   (`FrontendUrl` output), the verified voice session (#4) for
+   (`FrontendUrl` output), the verified voice session (#3) for
    something real to film, and an AWS Builder ID — an account signup
    only the user can do.
 

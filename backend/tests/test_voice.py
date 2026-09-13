@@ -34,6 +34,7 @@ that already owns it, so nothing can drift.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -47,14 +48,19 @@ from strands.experimental.bidi import (
     ToolUseStreamEvent,
 )
 
+from agents import memory
 from agents.orchestrator import OPENING_TURN, ORCHESTRATOR_SYSTEM_PROMPT
+from agents.session import ClinicSession
 from agents.voice import (
     DEFAULT_VOICE_REGION,
+    MEMORY_CONTEXT_TEMPLATE,
     SILENT_PRIMING_AUDIO,
     VOICE_ID_ENV,
     VOICE_MODEL_ENV,
     VOICE_PROMPT_SUFFIX,
     VOICE_REGION_ENV,
+    MemoryContext,
+    VoiceCall,
     build_nova_sonic_model,
     build_voice_agent,
     greet,
@@ -431,9 +437,9 @@ def test_a_voice_call_reads_its_clinic_before_anything_is_connected(
     """`start_voice_call` is the one entry point, so the clinic it read is
     the clinic the prompt names two agent layers down."""
     tables()
-    agent = start_voice_call(DENTAL_ID, voice_model=ScriptedBidiModel())
-    assert dental_session().clinic_name in (agent.system_prompt or "")
-    assert agent.tool_names == ASSISTANTS
+    call = start_voice_call(DENTAL_ID, voice_model=ScriptedBidiModel())
+    assert dental_session().clinic_name in (call.agent.system_prompt or "")
+    assert call.agent.tool_names == ASSISTANTS
 
 
 @pytest.mark.parametrize(
@@ -652,3 +658,159 @@ def test_the_spoken_call_accumulates_in_the_agent(tables) -> None:  # noqa: F811
     assert "Nine on Wednesday for a check-up, please." in rendered
     assert "scheduling_assistant" in rendered
     assert "That is booked for nine o'clock on Wednesday." in rendered
+
+
+# --------------------------------------------------------------------------
+# A returning patient's context, injected once the call knows who it is
+# --------------------------------------------------------------------------
+
+
+def _drive_with_context(
+    agent: Any, session: ClinicSession, turn: str, model: ScriptedBidiModel
+) -> None:
+    """Run one manual pump of a call that includes the memory channel.
+
+    `take_call` cannot be used here: the memory channel is an *input*
+    that `BidiAgent.run` would pump, and this drive owns the equivalent
+    pieces itself -- start the channel (which subscribes), pump it in a
+    task, and cancel it on the way out the way `run`'s own output loop
+    cancels the inputs task.
+    """
+
+    async def drive() -> None:
+        await agent.start()
+        context = MemoryContext(session)
+        await context.start(agent)
+        pump = asyncio.create_task(context())
+        try:
+            await agent.send(turn)
+            async for event in agent.receive():
+                # Stop on a response that follows the injection, or once
+                # the script is spent -- whichever way the race between
+                # the tool result and the identity event resolves.
+                if isinstance(event, BidiResponseCompleteEvent) and (
+                    not model.turns
+                    or any(
+                        text.startswith("Context from this patient's previous calls:")
+                        for text in model.text_sent
+                    )
+                ):
+                    return
+        finally:
+            await context.stop()
+            pump.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await pump
+            await agent.stop()
+
+    asyncio.run(asyncio.wait_for(drive(), CALL_TIMEOUT_SECONDS))
+
+
+def test_a_returning_patients_summary_reaches_the_model_once(
+    tables,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The call's context injection: the booking identifies the patient
+    mid-call, the channel retrieves the summary and sends it into the
+    running conversation as a stage direction -- exactly once, and never
+    as part of the system prompt."""
+    tables()
+    monkeypatch.setattr(
+        memory,
+        "retrieve_summary",
+        lambda actor: "Calls about cleanings; prefers mornings.",
+    )
+    session = dental_session()
+    voice_model = ScriptedBidiModel(
+        (
+            "tool",
+            (
+                "scheduling_assistant",
+                {
+                    "request": (
+                        f"{NAME} on {PHONE} wants a check-up at 9am on {WEDNESDAY}."
+                    )
+                },
+            ),
+        ),
+        ("say", "That is booked for nine o'clock on Wednesday."),
+        # The context turn releases one more scripted response, so the
+        # drive has something to stop on.
+        ("say", "Understood."),
+    )
+    agent = build_voice_agent(
+        session, voice_model=voice_model, text_model=booking_text_script()
+    )
+
+    _drive_with_context(
+        agent, session, "Nine on Wednesday for a check-up, please.", voice_model
+    )
+
+    contexts = [
+        text
+        for text in voice_model.text_sent
+        if text.startswith("Context from this patient's previous calls:")
+    ]
+    assert contexts == [
+        MEMORY_CONTEXT_TEMPLATE.format(summary="Calls about cleanings; prefers mornings.")
+    ]
+    # And it is context, not configuration: the prompt the call was
+    # opened with is untouched.
+    assert "Context from this patient's previous calls" not in (
+        voice_model.started["system_prompt"] or ""
+    )
+
+
+def test_a_first_time_caller_gets_no_context_at_all(
+    tables,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No summary recorded, or memory unreachable: nothing is sent, and
+    the call proceeds exactly as it would have without memory."""
+    tables()
+    monkeypatch.setattr(memory, "retrieve_summary", lambda actor: None)
+    session = dental_session()
+    voice_model = ScriptedBidiModel(("say", "Bright Smile Dental, how can I help?"))
+    agent = build_voice_agent(session, voice_model=voice_model)
+
+    _drive_with_context(agent, session, "Hello?", voice_model)
+
+    assert not [
+        text
+        for text in voice_model.text_sent
+        if text.startswith("Context from this patient's previous calls:")
+    ]
+
+
+def test_a_call_that_never_identifies_anybody_sends_nothing(
+    tables,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No booking, no identity, no retrieval -- the channel stays
+    silent for the whole call rather than inventing a fallback actor."""
+    tables()
+
+    def _bomb(actor: str) -> str | None:
+        raise AssertionError("retrieve_summary must not run for an unidentified caller")
+
+    monkeypatch.setattr(memory, "retrieve_summary", _bomb)
+    session = dental_session()
+    voice_model = ScriptedBidiModel(("say", "Bright Smile Dental, how can I help?"))
+    agent = build_voice_agent(session, voice_model=voice_model)
+
+    _drive_with_context(agent, session, "Hello?", voice_model)
+
+    assert len(voice_model.text_sent) == 1  # the patient's turn, nothing else
+
+
+def test_starting_a_call_exposes_the_session_alongside_the_agent(
+    tables,  # noqa: F811
+) -> None:
+    """The interfaces need the session to wire the memory channels, and
+    this is the one entry point that already builds it -- so it hands
+    both back rather than making a caller rebuild what it checked."""
+    tables()
+    call = start_voice_call(DENTAL_ID, voice_model=ScriptedBidiModel())
+    assert isinstance(call, VoiceCall)
+    assert call.session.clinic_id == DENTAL_ID
+    assert dental_session().clinic_name in (call.agent.system_prompt or "")
