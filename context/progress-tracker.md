@@ -127,6 +127,16 @@ Update this file after every meaningful implementation change.
   — demo video, live demo link, AWS Builder ID — is blocked on the same
   missing deploy as Next Up #1, not on anything this environment could
   still write.
+- **`frontend_stack.py` is no longer empty** (old Next Up #3). The last
+  stack skeleton now provisions the SPA's real hosting — private S3
+  bucket, CloudFront over an Origin Access Control with the SPA
+  fallback, and a `BucketDeployment` of `frontend/dist/` that
+  invalidates the cache — plus the `FrontendUrl` output the submission's
+  live demo link is. The SPA's config stays build-time (`VITE_*` in
+  `frontend/.env`, a design decision confirmed with the user), so no
+  frontend code changed and the stack takes nothing from the api/agent
+  stacks. `cdk synth` verifies it alone and as part of all five; only
+  the actual deploy remains. See Completed.
 
 ## Current Goal
 
@@ -167,6 +177,62 @@ Update this file after every meaningful implementation change.
   see Next Up.
 
 ## Completed
+
+- **The frontend hosting stack** (`backend/infra/frontend_stack.py`,
+  old Next Up #3 — the last empty stack skeleton in the CDK app). One
+  module, no new dependencies (`aws-s3-deployment` ships inside
+  `aws-cdk-lib`), no frontend code touched.
+  **One design decision, made with the user rather than defaulted**
+  (`ai-workflow-rules.md` -> Handling Missing Requirements): the SPA
+  keeps reading its `VITE_*` config at **build** time —
+  `frontend/.env.example` already maps every variable to the stack
+  output it comes from — so this stack needs no values from the
+  api/agent stacks and the deploy order is: deploy those, copy their
+  outputs into `frontend/.env`, `npm run build`, then deploy this one.
+  Rejected: a runtime `config.json` fetched at load (true one-command
+  deploys, but a frontend refactor plus a CDK custom resource — a
+  separate frontend unit by the split rules) and Lambda@Edge injection
+  (a Lambda in every request path, hardest to debug) — both more
+  moving parts than a demo needs before the deadline.
+  **What the stack provisions**: a private S3 bucket (same dev/prod
+  environment branch as every other stack — `dev` auto-deletes its
+  contents so `cdk destroy` works on a bucket the deployment filled);
+  a CloudFront distribution whose origin is an `S3OriginAccessControl`
+  (the bucket's only external grant is `cloudfront.amazonaws.com`
+  `s3:GetObject`; no public bucket, no legacy OAI); HTTPS-by-default;
+  and the two SPA error-response mappings (403/404 -> `/index.html`
+  with 200) — belt and braces given the app's hash routing, but a raw
+  403 page would look broken where the app itself recovers. A
+  `BucketDeployment` uploads `frontend/dist/` (resolved from the
+  stack file's location, not the working directory, so `cdk` can be
+  run from anywhere) and invalidates `/*`, so a rebuild + redeploy
+  serves the new build rather than CloudFront's cached copy of the
+  old one. `CfnOutput FrontendUrl` is the hackathon's live demo link.
+  **One CDK-version fact surfaced**: this environment's
+  `aws-cdk-lib` (2.269.0, freshly installed into `backend/.venv` —
+  the venv had no CDK packages at all this session) has no generic
+  `OriginAccessControl` L2; the modern pair is
+  `cloudfront.S3OriginAccessControl` +
+  `origins.S3BucketOrigin.with_origin_access_control`. Wiring the OAC
+  as a raw id string left a legacy OAI on the origin alongside the
+  OAC — caught by inspecting the synthesised template, not by an
+  error — and passing the construct instead removed it.
+  The root `README.md` gained a "Deploying (and the live demo link)"
+  section with the five-step order, and its submission checklist now
+  points the live-demo-link line at the `FrontendUrl` output instead
+  of "pending deployment".
+  Verified: `npm run build` (fresh `dist/`), `cdk synth` for the
+  frontend stack alone and for all five stacks together (the two
+  annotations that appear are pre-existing Agent-stack ones), and the
+  synthesised template inspected directly — the bucket policy's only
+  external principal is CloudFront with `s3:GetObject`, the origin
+  references the OAC with the empty-identity `S3OriginConfig`
+  CloudFront requires alongside it, and both error responses and the
+  `FrontendUrl` output are present.
+  **Not verified, and cannot be here**: the actual deploy and a live
+  URL — it needs credentials and `frontend/.env` filled from the
+  deployed stacks' outputs first (README "Deploying", steps 1-5), and
+  is folded into Next Up #6.
 
 - **Fixed "technical trouble" on every booking: the runtime role could
   not invoke the sub-agents' text model** (found during Next Up #1's
@@ -2376,17 +2442,14 @@ accordingly.
 2. **Escalation email notifications** — when the agent creates an
    escalation, notify clinic staff by email (SES) so an escalation is
    actionable without watching the dashboard.
-3. **Frontend hosting stack** — fill the empty `frontend_stack.py`: S3 +
-   CloudFront for the built SPA, producing the public demo link item #6
-   needs.
-4. **AgentCore Memory** — session state per `architecture.md`, so the
+3. **AgentCore Memory** — session state per `architecture.md`, so the
    voice agent remembers context across a call (and optionally across
    calls) without process-level state.
-5. **Settings tab** — editable hours and services (user decision,
+4. **Settings tab** — editable hours and services (user decision,
    2026-09-12): staff edit hours/closures/services in the dashboard,
    writing to the Clinics table. Needs a new authenticated write route
    plus validation — backend unit first, then its frontend half.
-6. Deploy `agentcore_app.py` to the AgentCore Runtime and verify one
+5. Deploy `agentcore_app.py` to the AgentCore Runtime and verify one
    voice session end-to-end. **Status note (2026-09-12): the user
    reports the CDK deploy and seed have now been run and the frontend
    tested locally** — the "blocked in this environment" caveats that
@@ -2396,7 +2459,7 @@ accordingly.
    what makes possible. Whether the KB-swap resume steps in "In
    Progress" were part of the reported deploy is unconfirmed; read that
    section before touching the Agent stack.
-7. **Demo video, live demo link, AWS Builder ID / builder.aws.com
+6. **Demo video, live demo link, AWS Builder ID / builder.aws.com
    post.** The architecture diagram and README half of the old #2 is
    done (see Completed) — a root `LICENSE` (MIT) and
    `docs/architecture.md` (a Mermaid system diagram plus a reading
@@ -2404,9 +2467,11 @@ accordingly.
    too, alongside a rewritten root `README.md` covering status, stack,
    repo layout, local run instructions for every piece that *can* run
    here (tests, `cdk synth`, frontend build, seed `--dry-run`), and a
-   submission checklist. What remains of this item needs #3's hosting
-   stack for the live demo link and #6's verified deployment for
-   something real to film/link; an AWS Builder ID is an account signup
+   submission checklist. The hosting stack's code is done too (the
+   old #3, see Completed); what remains of this item is deploying it
+   per the README's "Deploying" section for the live demo link
+   (`FrontendUrl` output), the verified voice session (#5) for
+   something real to film, and an AWS Builder ID — an account signup
    only the user can do.
 
 ## Open Questions

@@ -111,6 +111,27 @@ a real seed run) needs AWS credentials and, for the deploy, Docker — see
 `context/progress-tracker.md` → Session Notes for the exact commands and
 why they're currently blocked in the build environment.
 
+## Deploying (and the live demo link)
+
+The SPA reads its config (`VITE_*`) from `frontend/.env` at **build**
+time — see `frontend/.env.example` for the mapping from each variable
+to the stack output it comes from. So the deploy order is:
+
+1. `cdk deploy` the data / agent / api / automation stacks
+   (from `backend/infra`; the agent stack needs Docker running).
+2. `python -m seed.run_seed` to seed the two demo clinics.
+3. Copy the stack outputs into `frontend/.env`
+   (`DashboardApiUrl`, `StaffUserPoolId`, `StaffUserPoolClientId`,
+   `PatientGuestIdentityPoolId`, `PatientGuestRoleArn`,
+   `AgentRuntimeArn`, and the region).
+4. `npm run build` in `frontend/`.
+5. `cdk deploy ClinicPilot-Dev-Frontend` — this uploads
+   `frontend/dist/` to the private S3 bucket behind CloudFront and
+   invalidates the cache. The stack's `FrontendUrl` output is the
+   public demo link.
+
+A rebuild + redeploy of the frontend is just steps 4 and 5.
+
 ## Hackathon submission
 
 - **Track**: AWS "Agents for Humans", Strands Agents SDK, Professional
@@ -118,7 +139,9 @@ why they're currently blocked in the build environment.
 - **License**: MIT — see [`LICENSE`](LICENSE). (`vendor/` keeps the
   original MIT-0 license of the code vendored into it.)
 - **Architecture diagram**: [`docs/architecture.md`](docs/architecture.md).
-- **Demo video / live demo link**: pending deployment — see Status above.
+- **Demo video**: pending — see Status above. **Live demo link**:
+  the deployed frontend stack's `FrontendUrl` output (see "Deploying"
+  above).
 
 ## Context files
 
