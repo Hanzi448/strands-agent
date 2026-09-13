@@ -22,14 +22,17 @@ export function VoiceScreen({ clinic, onExit }: VoiceScreenProps) {
     return () => call.disconnect();
   }, [call.connect, call.disconnect]);
 
+  // The mic is live for the whole call, so "listening" is the ambient
+  // state — the agent speaking is the thing worth showing when both
+  // are true (the greeting, an answer).
   const orbStatus: OrbStatus = call.errorMessage !== null
     ? "error"
     : !call.isConnected
       ? "connecting"
-      : call.isRecording
-        ? "listening"
-        : call.isSpeaking
-          ? "speaking"
+      : call.isSpeaking
+        ? "speaking"
+        : call.isRecording
+          ? "listening"
           : "ready";
 
   const handleOrbClick = () => {

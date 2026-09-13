@@ -6,7 +6,10 @@
  * typed, with deliberate changes: a RecordingHandle replaces the
  * sample's `as any` MediaRecorder stand-in, connect takes a clinicId
  * for the guest flow, transcript state flows through the pure
- * reducer, and playback is PCM-only (this runtime emits pcm).
+ * reducer, playback is PCM-only (this runtime emits pcm), and the
+ * mic auto-starts on connect — Nova Sonic times a call out at 55s
+ * without patient audio, so the caller is heard for the whole call
+ * (the vendored sample's shape).
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -96,67 +99,6 @@ export function useVoiceCall(clinicId: string): UseVoiceCallReturn {
     [playNextAudio],
   );
 
-  const connect = useCallback(async () => {
-    try {
-      setErrorMessage(null);
-      const connection = await connectToAgent({
-        clinicId,
-        onConnected: () => setIsConnected(true),
-        onDisconnected: (code, reason) => {
-          setIsConnected(false);
-          setIsRecording(false);
-          setIsSpeaking(false);
-          // 1000 is a normal close (we or the agent hung up); anything
-          // else deserves an explanation.
-          if (code !== 1000) setErrorMessage(describeClose(code, reason));
-        },
-        onAudioChunk: (audio, _format, sampleRate) => queueAudio(audio, sampleRate),
-        onTranscript: (text, isFinal, role) => {
-          setTranscript((prev) =>
-            applyToTranscript(prev, { kind: "transcript", text, isFinal, role }),
-          );
-        },
-        onInterruption: () => {
-          // The patient talked over the agent: drop whatever was queued
-          // or playing, and drop the in-flight partial.
-          audioQueueRef.current = [];
-          isPlayingRef.current = false;
-          setIsSpeaking(false);
-          setTranscript((prev) => applyToTranscript(prev, { kind: "interruption" }));
-        },
-        onError: (message) => setErrorMessage(message),
-      });
-      connectionRef.current = connection;
-    } catch (error) {
-      const detail = error instanceof Error ? error.message : String(error);
-      setErrorMessage(detail);
-    }
-  }, [clinicId, queueAudio]);
-
-  const stopRecording = useCallback(() => {
-    recordingRef.current?.stop();
-    recordingRef.current = null;
-    setIsRecording(false);
-  }, []);
-
-  const disconnect = useCallback(() => {
-    stopRecording();
-    connectionRef.current?.close();
-    connectionRef.current = null;
-
-    audioQueueRef.current = [];
-    isPlayingRef.current = false;
-    if (playbackContextRef.current && playbackContextRef.current.state !== "closed") {
-      void playbackContextRef.current.close();
-    }
-
-    setIsConnected(false);
-    setIsRecording(false);
-    setIsSpeaking(false);
-    setErrorMessage(null);
-    setTranscript(initialTranscript);
-  }, [stopRecording]);
-
   const startRecording = useCallback(async () => {
     if (recordingRef.current !== null || !connectionRef.current?.isConnected()) return;
     try {
@@ -209,6 +151,73 @@ export function useVoiceCall(clinicId: string): UseVoiceCallReturn {
       setErrorMessage(`Microphone error: ${detail}`);
     }
   }, []);
+
+  const connect = useCallback(async () => {
+    try {
+      setErrorMessage(null);
+      const connection = await connectToAgent({
+        clinicId,
+        onConnected: () => setIsConnected(true),
+        onDisconnected: (code, reason) => {
+          setIsConnected(false);
+          setIsRecording(false);
+          setIsSpeaking(false);
+          // 1000 is a normal close (we or the agent hung up); anything
+          // else deserves an explanation.
+          if (code !== 1000) setErrorMessage(describeClose(code, reason));
+        },
+        onAudioChunk: (audio, _format, sampleRate) => queueAudio(audio, sampleRate),
+        onTranscript: (text, isFinal, role) => {
+          setTranscript((prev) =>
+            applyToTranscript(prev, { kind: "transcript", text, isFinal, role }),
+          );
+        },
+        onInterruption: () => {
+          // The patient talked over the agent: drop whatever was queued
+          // or playing, and drop the in-flight partial.
+          audioQueueRef.current = [];
+          isPlayingRef.current = false;
+          setIsSpeaking(false);
+          setTranscript((prev) => applyToTranscript(prev, { kind: "interruption" }));
+        },
+        onError: (message) => setErrorMessage(message),
+      });
+      connectionRef.current = connection;
+      // The mic opens the moment the connection does: Nova Sonic drops
+      // a call with no patient audio after 55s, and a patient who
+      // hesitates through the greeting must not be timed out for it.
+      // The orb stays tappable, so the mic can still be paused; a
+      // denied permission surfaces as an error the patient can retry.
+      void startRecording();
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      setErrorMessage(detail);
+    }
+  }, [clinicId, queueAudio, startRecording]);
+
+  const stopRecording = useCallback(() => {
+    recordingRef.current?.stop();
+    recordingRef.current = null;
+    setIsRecording(false);
+  }, []);
+
+  const disconnect = useCallback(() => {
+    stopRecording();
+    connectionRef.current?.close();
+    connectionRef.current = null;
+
+    audioQueueRef.current = [];
+    isPlayingRef.current = false;
+    if (playbackContextRef.current && playbackContextRef.current.state !== "closed") {
+      void playbackContextRef.current.close();
+    }
+
+    setIsConnected(false);
+    setIsRecording(false);
+    setIsSpeaking(false);
+    setErrorMessage(null);
+    setTranscript(initialTranscript);
+  }, [stopRecording]);
 
   const clearError = useCallback(() => setErrorMessage(null), []);
 

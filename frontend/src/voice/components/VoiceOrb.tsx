@@ -16,7 +16,7 @@ const ORB_STYLES: Record<OrbStatus, string> = {
 
 const ORB_LABELS: Record<OrbStatus, string> = {
   connecting: "Connecting to the clinic…",
-  ready: "Tap to speak",
+  ready: "Mic muted — tap to speak",
   listening: "Listening — tap to pause",
   speaking: "The clinic is speaking",
   error: "The call failed",

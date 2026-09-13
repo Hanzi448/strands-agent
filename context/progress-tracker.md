@@ -168,6 +168,42 @@ Update this file after every meaningful implementation change.
 
 ## Completed
 
+- **Auto-start the mic on connect** (Next Up #1's product decision,
+  made and implemented in one unit). The user's call, asked and
+  answered directly (`ai-workflow-rules.md` -> Handling Missing
+  Requirements): between auto-starting the mic and server-side
+  keepalive silence, **auto-start** — the vendored sample's shape,
+  and what the greeting-silence probes already proved keeps a
+  session alive (an open audio stream). Frontend-only; no backend
+  change, no redeploy.
+  **`useVoiceCall.ts` opens the mic the moment `connect` resolves.**
+  `startRecording` moved above `connect` (a `useCallback` deps array
+  is evaluated at declaration, so the old order could not reference
+  it) and `connect` ends with `void startRecording()` after
+  `connectionRef` is set — so the sequence is socket open, clinic
+  handshake, greeting priming (server) and mic live, all before the
+  patient is expected to say anything. A patient who hesitates
+  through the greeting can no longer be timed out for it; one who
+  denies the mic gets the existing "Microphone error: …" message and
+  can retry by tapping the orb, which stays tappable.
+  **The orb's precedence changed with it.** With the mic live for the
+  whole call, "listening" is the ambient state, so `VoiceScreen`'s
+  status chain now checks `isSpeaking` before `isRecording` —
+  otherwise the orb would say "Listening — tap to pause" through the
+  greeting and every answer, and "The clinic is speaking" would never
+  show. The paused state's label ("ready") reads "Mic muted — tap to
+  speak", since that state now means the patient deliberately paused,
+  not "hasn't started yet".
+  Verified: `npm test` — 27 Vitest tests pass unchanged (they cover
+  `voice/lib/`, which this unit did not touch); `npm run build` clean.
+  The hook itself has no test — consistent with how the voice-UI unit
+  shipped (its 27 tests are the pure `lib/` modules; the hook's
+  glue is what the human browser check exercises).
+  **Not verified, and cannot be here**: hearing it. Whether the
+  auto-started mic plus echo cancellation leaves the greeting
+  intelligible, and whether a real speaker's first sentence survives
+  the greeting, is exactly the human check Next Up #1 now has left.
+
 - **Fixed the greeting silence: `voice.greet` primes Nova Sonic's
   audio container before the opening turn** (Next Up #1, the live-bug
   half — diagnosed, fixed, and verified over the deployed runtime).
@@ -2273,13 +2309,19 @@ accordingly.
    silence before `OPENING_TURN`; the Agent stack was redeployed and
    answered the live probe with a spoken greeting (see Session Notes,
    "The greeting silence"). The scratch probes were cleaned up after
-   that verification. **What remains is the human check and one
-   product decision**: a real browser session (a person listening and
-   speaking — no probe substitutes for hearing the agent), and what
-   happens when the patient never taps the mic — Nova Sonic times out
-   at 55s of no input after the greeting, so the UI should either
-   auto-start the mic on connect or keep the stream alive (an open
-   question, not decided here).
+   that verification. **The mic-timeout decision is made and
+   implemented (2026-09-13): auto-start the mic on connect** — the
+   user's call this session (the alternative was server-side
+   keepalive silence). `useVoiceCall.ts` now opens the mic the moment
+   `connect` resolves — the vendored sample's shape, and what the
+   greeting-silence probes already proved keeps a call alive: an open
+   audio stream. `VoiceScreen.tsx` gives "speaking" precedence over
+   "listening" in the orb (listening is the ambient state with the
+   mic always live), and the muted state's label reads "Mic muted —
+   tap to speak". 27 Vitest tests and `npm run build` both clean.
+   **What remains is the human check only**: a real browser session —
+   a person listening and speaking, no probe substitutes for hearing
+   the agent — with the auto-started mic behind it.
 2. **Escalation email notifications** — when the agent creates an
    escalation, notify clinic staff by email (SES) so an escalation is
    actionable without watching the dashboard.
@@ -2318,17 +2360,14 @@ accordingly.
 
 ## Open Questions
 
-- **What happens when a connected patient never taps the mic?** Nova
-  Sonic times a connection out at 55s without input ("gaps between
-  audio bytes and interactive content are less than 55 seconds" —
-  observed live, see Session Notes "The greeting silence"). The voice
-  UI's orb says "Tap to speak", so a patient who listens to the
-  greeting and hesitates gets silently disconnected just under a
-  minute in. Two options: auto-start the mic on connect (the vendored
-  sample's shape — the caller is heard the whole time), or have the
-  server keep the stream alive with periodic silence after the
-  greeting. Product feel vs. simplicity; needs the user's call before
-  the voice UI can be called done.
+- ~~**What happens when a connected patient never taps the mic?**~~
+  **Resolved (2026-09-13): auto-start the mic on connect** — the
+  user's decision, implemented in `useVoiceCall.ts` (see Next Up #1).
+  The vendored sample's shape: the caller is heard for the whole
+  call, so no 55s timeout can hit and no server change was needed.
+  Rejected: server-side keepalive silence after the greeting, which
+  keeps a hesitant patient connected but adds a server-side change
+  and a redeploy for a patient who then says nothing anyway.
 
 - ~~**What is the shape of a clinic's `hours` and `services`
   config?**~~ **Resolved** — specified in `architecture.md` ->
@@ -3049,6 +3088,29 @@ accordingly.
 
 ## Session Notes
 
+- **Two out-of-band commits reconciled into the tracker (2026-09-13).**
+  Found while following the read order — the repo and tracker
+  disagreed, so per `CLAUDE.md` they were reconciled before new work:
+  - `987a27d` "Fix CORDS Header" (user, 2026-09-12):
+    `lambda/dashboard_api.py`'s `_response` now sends
+    `Access-Control-Allow-Origin: *` plus allow-headers/methods, so
+    the locally-run frontend can call the deployed dashboard API
+    (CORS). Note: `Access-Control-Allow-Origin: *` is fine for the
+    hackathon demo but is a wildcard a real deployment would scope to
+    the CloudFront domain (Next Up #3).
+  - `8d5eee8` "SES Email Add" (user, 2026-09-12):
+    `automation_stack.py` sets
+    `CLINICPILOT_REMINDER_SENDER_EMAIL=hanzalasalaheen@gmail.com` in
+    the background-scan Lambda's env — the variable
+    `tools.automation.REMINDER_SENDER_ENV` reads, which the stack had
+    deliberately omitted pending a verified SES identity. The Open
+    Questions "SES sandbox" entry says that Gmail address is the one
+    verified manually in the console, so this is that decision
+    applied. One drift it leaves: the comment block right below the
+    new line still says the variable is "Deliberately absent".
+  Neither changes any Next Up ordering; both are recorded here so
+  the tracker is no longer behind the repo.
+
 - **The greeting silence: root cause found and fixed (2026-09-13).**
   Nova Sonic answers a turn **only during an active voice session** —
   an audio input container that is open and streaming. Probes against
@@ -3092,7 +3154,8 @@ accordingly.
   audio bytes … less than 55 seconds"). A browser whose mic is off
   will hit it; the voice UI should auto-start the mic (or the agent
   keep the stream alive) — belongs to the voice-UI item's remaining
-  browser-session work, not to the greeting.
+  browser-session work, not to the greeting. *(Done since — the
+  auto-start decision, 2026-09-13; see Next Up #1.)*
   Scratch probes deleted after deployed verification passed:
   `backend/scratch_*.py`, `backend/scratch_*.log`,
   `backend/hello_speech.pcm`, `frontend/probe-handshake.mjs`.
