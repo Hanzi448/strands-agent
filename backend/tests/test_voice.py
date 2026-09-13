@@ -355,6 +355,17 @@ def test_the_suffix_is_about_the_medium_and_not_about_the_clinic() -> None:
     assert "ask for it again" in suffix
 
 
+def test_the_suffix_tells_the_model_how_to_take_a_spoken_number() -> None:
+    """A patient says digits as words -- "one three three four two" -- and
+    the assistant the number is passed to needs numerals. Without this
+    rule the model either hands the words on verbatim (and
+    `normalise_phone` strips them to nothing) or reads "one five" as the
+    number fifteen. Pinned on the user's decision, 2026-09-13."""
+    suffix = " ".join(VOICE_PROMPT_SUFFIX.lower().split())
+    assert "as digits" in suffix
+    assert "separate digits, never as a number" in suffix
+
+
 def test_the_prompt_names_the_clinic_the_call_was_opened_for() -> None:
     """Two clinics, two prompts. The same process serving both is the
     multi-tenancy claim, and the prompt is where it first shows."""

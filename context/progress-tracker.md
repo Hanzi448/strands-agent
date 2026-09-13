@@ -168,6 +168,57 @@ Update this file after every meaningful implementation change.
 
 ## Completed
 
+- **Fixed "technical trouble" on every booking: the runtime role could
+  not invoke the sub-agents' text model** (found during Next Up #1's
+  human check, 2026-09-13). Diagnosed by systematic debugging, root
+  cause proven before any fix, both the IAM gap and the prompt gap
+  fixed in one unit, and the Agent stack redeployed.
+  **Symptom**: the user's first real browser session — greeting and
+  chat fine, but "I'm having technical trouble, I can't process your
+  request" the moment a booking needed the Scheduling sub-agent.
+  CloudWatch showed *zero* tool-layer failures, which ruled out
+  `backend/tools/` and pointed at the layer above it.
+  **Root cause, proven two ways**: `CLINICPILOT_TEXT_MODEL` is unset,
+  so the sub-agents run on Strands' default — `us.anthropic.claude-
+  sonnet-4-6`, a cross-region **inference profile**, not a foundation
+  model. The runtime role's grant covered only
+  `foundation-model/*`, and `aws iam simulate-principal-policy`
+  returned `implicitDeny` on the inference-profile ARN while
+  `allowed` on a foundation-model ARN — exactly the split that made
+  the voice model (Nova Sonic, a foundation model) work while every
+  sub-agent call failed as AccessDenied, leaving the speech model to
+  relay the failure as "technical trouble".
+  **The fix is a second, still-scoped grant**: `InvokeBedrock*
+  ` on `arn:aws:bedrock:{region}:{account}:inference-profile/*` in
+  `agent_stack.py` — one resource type in this account/region, not a
+  blanket `*`. Re-simulated after deploy: `allowed`.
+  **Two environmental blockers found while verifying, both outside
+  this repo**: (1) this account has not submitted the **Anthropic
+  use-case form**, so Claude models return "Model use case details
+  have not been submitted" even with IAM fixed — a console action
+  only the user can do; (2) the account hit a **daily on-demand token
+  quota** ("Too many tokens per day") on Nova/DeepSeek/Mistral
+  during testing, which resets (the session's own Nova Sonic calls
+  had worked earlier that day). Until the form is submitted, the
+  sub-agents still cannot complete a booking — the fix is deployed
+  but the human check cannot pass yet.
+  **Landed with it (user's request, same redeploy)**: `VOICE_PROMPT_SUFFIX`
+  gained the spoken-digit rule — a patient says a number as "one three
+  three four two", the model writes exactly those digits in order,
+  never converts "one five" to fifteen, and reads them back digit by
+  digit before passing them on. TDD: the pinning test was written
+  first and watched fail. Verified: **776 passed** (775 before, 1
+  new); `cdk synth` carries the new grant (inspected in the template
+  JSON directly); Agent stack redeployed (`exit 0`, new container
+  asset built, 46s deployment); live role simulation `allowed`.
+  Also recorded: **post-hackathon direction (user decision,
+  2026-09-13)** — after submission, this becomes a full production
+  SaaS (tenant onboarding, per-clinic phone numbers, calendar
+  integration, clinic config UI); see Open Questions.
+  Not yet done: the booking end-to-end human check, blocked on the
+  Anthropic form + quota reset above, folded into Next Up #1's
+  remaining human check.
+
 - **Auto-start the mic on connect** (Next Up #1's product decision,
   made and implemented in one unit). The user's call, asked and
   answered directly (`ai-workflow-rules.md` -> Handling Missing
@@ -2360,6 +2411,20 @@ accordingly.
 
 ## Open Questions
 
+- **Post-hackathon roadmap: grow ClinicPilot into a full production
+  SaaS** (user decision, 2026-09-13, recorded explicitly on request).
+  For the hackathon submission, the scope stays exactly as
+  `project-overview.md` defines it — two seeded demo clinics, no
+  tenant onboarding, browser voice only. After the hackathon, the
+  product direction is a multi-tenant SaaS clinics sign up for and
+  configure themselves. The named gaps to close then: self-serve
+  tenant onboarding (replacing seed scripts), per-clinic phone
+  numbers / real telephony (Amazon Connect), external calendar
+  integration (the diary currently lives only in DynamoDB),
+  per-clinic branding/location/config UI (beyond the Settings tab),
+  billing, and production observability. Not an open question — a
+  direction, deliberately out of scope until submission.
+
 - ~~**What happens when a connected patient never taps the mic?**~~
   **Resolved (2026-09-13): auto-start the mic on connect** — the
   user's decision, implemented in `useVoiceCall.ts` (see Next Up #1).
@@ -2368,6 +2433,15 @@ accordingly.
   Rejected: server-side keepalive silence after the greeting, which
   keeps a hesitant patient connected but adds a server-side change
   and a redeploy for a patient who then says nothing anyway.
+
+- ~~**How does the model take a phone number a patient speaks as
+  words?**~~ **Resolved (2026-09-13)** — prompt-level rule in
+  `VOICE_PROMPT_SUFFIX` (user's request): the patient says digits
+  one at a time ("one three three four two"), the model writes down
+  exactly those digits in that order, never converts "one five" to
+  fifteen, and reads the number back digit by digit to confirm
+  before passing it to an assistant. Implemented with the IAM fix
+  above (one redeploy for both); see Completed.
 
 - ~~**What is the shape of a clinic's `hours` and `services`
   config?**~~ **Resolved** — specified in `architecture.md` ->

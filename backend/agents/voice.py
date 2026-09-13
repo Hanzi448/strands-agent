@@ -118,6 +118,11 @@ names, phone numbers and dates more than anything else:
 - Read a name and a phone number back to the patient and wait for them to agree
   before you pass either to an assistant. Say a phone number as digits, in
   small groups, not as a whole number.
+- A patient says a phone number as separate digits, never as a number --
+  "one three three four two", not "thirteen thousand". Write down exactly
+  the digits you heard, in the order you heard them, and never convert
+  "one five" into fifteen. Read the number back digit by digit to confirm
+  it before you pass it to an assistant.
 - Say a date as the weekday and the day, not as numbers, and say a time the way
   a person says it.
 - If you did not hear something clearly, ask for it again. Never fill in a name,

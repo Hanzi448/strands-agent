@@ -390,6 +390,30 @@ class AgentStack(Stack):
             )
         )
 
+        # The same invoke actions on this account's inference profiles,
+        # which the statement above does not cover. Strands' default text
+        # model resolves to a cross-region inference profile
+        # (`us.anthropic.claude-sonnet-4-6`) rather than a foundation
+        # model, so with only `foundation-model/*` every sub-agent call
+        # was an implicitDeny -- the deployed bug behind "technical
+        # trouble" on any booking (found 2026-09-13 by simulating the
+        # runtime role's policy against both ARN shapes). Scoped to this
+        # account's own profiles, still one resource type, not a blanket
+        # `*`.
+        runtime.add_to_role_policy(
+            iam.PolicyStatement(
+                sid="InvokeBedrockInferenceProfiles",
+                actions=[
+                    "bedrock:InvokeModel",
+                    "bedrock:InvokeModelWithResponseStream",
+                    "bedrock:InvokeModelWithBidirectionalStream",
+                ],
+                resources=[
+                    f"arn:aws:bedrock:{self.region}:{self.account}:inference-profile/*"
+                ],
+            )
+        )
+
         for sid, table, actions in (
             ("ReadClinicsTable", clinics_table, ["dynamodb:GetItem"]),
             (
