@@ -61,12 +61,14 @@ browser's WebSocket, once deployed).
 from __future__ import annotations
 
 import asyncio
+import base64
 import os
 from collections.abc import Callable
 from typing import Final, NoReturn
 
 from strands.experimental.bidi import BidiAgent
 from strands.experimental.bidi.models.model import BidiModel
+from strands.experimental.bidi.types.events import BidiAudioInputEvent
 from strands.experimental.bidi.types.io import BidiInput
 from strands.models.model import Model
 
@@ -273,16 +275,55 @@ def start_voice_call(
     )
 
 
+# What the greeting opens the model's audio input container with. Nova
+# Sonic answers a turn only during an *active voice session*: a text turn
+# sent while no audio content is open is accepted and never answered --
+# verified live against the real model (2026-09-13, `progress-tracker.md`
+# -> Session Notes, "The greeting silence"). One second of silence is
+# enough to open the container; it provokes no response of its own, since
+# endpointing on silence detects no turn. `BidiAgent.run`'s loop keeps
+# reading inputs after `start` returns, so the caller's own audio joins
+# the same already-open container rather than opening a second one.
+SILENT_PRIMING_AUDIO: Final[str] = base64.b64encode(b"\x00" * 3200).decode()  # 100ms x 10
+
+# How many priming chunks `greet` sends. Ten is one second of 16kHz
+# 16-bit mono silence -- long enough for Nova Sonic to open the audio
+# container, short enough that the greeting is still the first thing a
+# connected patient hears.
+SILENT_PRIMING_CHUNKS: Final[int] = 10
+
+# The audio shape Nova Sonic listens at. `BidiAgent` and the tool layer
+# leave this to the model's configuration; the greeting's priming events
+# must state it explicitly because they are constructed here.
+PRIMING_SAMPLE_RATE: Final[int] = 16000
+PRIMING_CHANNELS: Final[int] = 1
+
+
 async def greet(agent: BidiAgent) -> None:
     """Prompt the agent to speak first, once the connection is open.
 
-    Sends `OPENING_TURN` -- a stage direction, not a greeting, so the
-    words the patient hears are the model's own. Call it after
+    Opens the model's audio input container with silence, then sends
+    `OPENING_TURN` -- a stage direction, not a greeting, so the words the
+    patient hears are the model's own. The silence is load-bearing, not
+    decoration: Nova Sonic answers a turn only during an active voice
+    session, so without it the stage direction would be accepted and
+    never answered (see SILENT_PRIMING_AUDIO). Call it after
     `BidiAgent.start`; before that there is no connection to send on.
 
     Args:
         agent: The started voice agent for this call.
     """
+    # The silence opens the audio container, which is what makes the
+    # stage direction answerable -- see SILENT_PRIMING_AUDIO.
+    for _ in range(SILENT_PRIMING_CHUNKS):
+        await agent.send(
+            BidiAudioInputEvent(
+                audio=SILENT_PRIMING_AUDIO,
+                format="pcm",
+                sample_rate=PRIMING_SAMPLE_RATE,  # type: ignore[arg-type]
+                channels=PRIMING_CHANNELS,  # type: ignore[arg-type]
+            )
+        )
     await agent.send(OPENING_TURN)
 
 

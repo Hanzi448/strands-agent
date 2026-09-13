@@ -39,6 +39,7 @@ from typing import Any
 
 import pytest
 from strands.experimental.bidi import (
+    BidiAudioInputEvent,
     BidiResponseCompleteEvent,
     BidiTextInputEvent,
     BidiTranscriptStreamEvent,
@@ -49,6 +50,7 @@ from strands.experimental.bidi import (
 from agents.orchestrator import OPENING_TURN, ORCHESTRATOR_SYSTEM_PROMPT
 from agents.voice import (
     DEFAULT_VOICE_REGION,
+    SILENT_PRIMING_AUDIO,
     VOICE_ID_ENV,
     VOICE_MODEL_ENV,
     VOICE_PROMPT_SUFFIX,
@@ -131,7 +133,13 @@ class ScriptedBidiModel:
 
     async def send(self, content: Any) -> None:
         self.sent.append(content)
-        await self._respond()
+        # Only a text input or a tool result releases the next scripted
+        # response -- the same rule as the real model, where audio alone
+        # never completes a turn and silence never does. Without this,
+        # `greet`'s silent priming chunks (see `voice.greet`) would
+        # consume the script one hundred milliseconds at a time.
+        if isinstance(content, (BidiTextInputEvent, ToolResultEvent)):
+            await self._respond()
 
     async def receive(self) -> AsyncIterator[Any]:
         assert self._queue is not None, "start was not called"
@@ -470,6 +478,56 @@ def test_the_call_is_opened_with_a_stage_direction_not_a_greeting(
 
     assert model.text_sent == [OPENING_TURN]
     assert dental_session().clinic_name not in OPENING_TURN
+
+
+def test_the_greeting_opens_the_audio_container_before_it_speaks(
+    tables,  # noqa: F811
+) -> None:
+    """Nova Sonic answers a turn only during an active voice session.
+
+    A text turn sent before any audio has opened the model's audio input
+    container is accepted and never answered -- verified live against the
+    real model (2026-09-13, `progress-tracker.md` -> Session Notes, "The
+    greeting silence"): input tokens grow, output stays at zero. So the
+    greeting must open the container itself, with silence, before the
+    stage direction -- the deployed browser has not sent any audio when
+    the greeting fires, and the local microphone interface need not have
+    either."""
+    tables()
+    model = ScriptedBidiModel()
+    agent = build_voice_agent(dental_session(), voice_model=model)
+
+    async def drive() -> None:
+        await agent.start()
+        try:
+            await greet(agent)
+        finally:
+            await agent.stop()
+
+    asyncio.run(asyncio.wait_for(drive(), CALL_TIMEOUT_SECONDS))
+
+    # What reached the model, in order, by event type.
+    kinds = [type(event).__name__ for event in model.sent]
+    assert kinds.count("BidiAudioInputEvent") >= 1, (
+        "the greeting sent no audio: Nova Sonic would never answer it"
+    )
+    assert kinds.index("BidiAudioInputEvent") < kinds.index(
+        "BidiTextInputEvent"
+    ), "the stage direction was sent before any audio opened the container"
+
+    # The priming audio is silence, at the rate Nova Sonic listens at.
+    priming = [
+        event
+        for event in model.sent
+        if isinstance(event, BidiAudioInputEvent)
+    ]
+    assert all(
+        event.audio == SILENT_PRIMING_AUDIO
+        and event.format == "pcm"
+        and event.sample_rate == 16000
+        and event.channels == 1
+        for event in priming
+    )
 
 
 # --------------------------------------------------------------------------

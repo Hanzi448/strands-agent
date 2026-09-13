@@ -168,6 +168,68 @@ Update this file after every meaningful implementation change.
 
 ## Completed
 
+- **Fixed the greeting silence: `voice.greet` primes Nova Sonic's
+  audio container before the opening turn** (Next Up #1, the live-bug
+  half — diagnosed, fixed, and verified over the deployed runtime).
+  One function changed (`agents/voice.py`), one new test, one
+  fidelity fix to the shared test fake. The Agent stack was
+  redeployed and answered a live probe with a spoken greeting.
+  **Root cause, established by four probes against the real model**
+  (systematic debugging, root cause before fix): Nova Sonic answers a
+  turn **only during an active voice session** — an audio input
+  container that is open. A bare interactive text turn before any
+  audio exists is *accepted* (input tokens grow) and *never answered*
+  (output pinned at 0): exactly the deployed symptom, since
+  `Greeting.start` fired `OPENING_TURN` immediately after
+  `BidiAgent.run` started, before any browser audio arrived. The
+  probes also ruled out the tracker's alternative candidates: real
+  speech followed by `contentEnd` (closing the container) still gets
+  no answer and times out at 55s — **`contentEnd` is not how a turn
+  ends; endpointing happens inside an open audio stream** — which is
+  why the vendored sample, whose browser streams mic audio
+  continuously, never hits either behavior.
+  **The fix is one second of silence.** `greet` now sends
+  `SILENT_PRIMING_CHUNKS` (10 × 100ms of 16kHz 16-bit mono silence,
+  `SILENT_PRIMING_AUDIO`) before `OPENING_TURN`. The silence opens
+  the audio container — making the stage direction answerable — and
+  provokes no response of its own, since endpointing on silence
+  detects no turn. The caller's own audio then joins the same
+  already-open container rather than opening a second one. Both
+  interfaces (`mic.py`, `agentcore_app.py`) get it for free because
+  both use the shared `Greeting` channel.
+  **TDD throughout.** The new test
+  (`test_the_greeting_opens_the_audio_container_before_it_speaks`)
+  was written first and watched fail; it pins that audio reaches the
+  model before the stage direction and that the priming is silence at
+  the rate Nova Sonic listens at. Fixing it surfaced one test-fake
+  fidelity gap, not an app bug: `ScriptedBidiModel.send` advanced its
+  script on *every* input, so the priming chunks consumed the
+  scripted responses — the real model never responds to audio alone,
+  and the fake now encodes that rule (only `BidiTextInputEvent` and
+  `ToolResultEvent` release a scripted response), which is itself a
+  fact the probes established about the real model.
+  Verified, in order: (1) the full backend suite — **775 passed**
+  (774 before, 1 new); (2) the production `greet` itself against the
+  real model locally — spoken greeting plus audio chunks, nothing
+  else sent; (3) the Agent stack redeployed
+  (`UPDATE_COMPLETE`, new container asset) and a live end-to-end
+  probe through the deployed runtime — basic-flow guest credentials,
+  presigned `/ws`, `{"clinic_id": ...}` handshake, and the spoken
+  greeting back over the socket with output tokens finally moving
+  (21 on the first response): *"Good morning, thank you for calling
+  Bright Smile Dental. How can I help you today?"* Frontend suite
+  re-run clean (27 Vitest) for good measure.
+  **Known behavior, deliberately not fixed here**: with no further
+  input after the greeting, Nova Sonic times the connection out at
+  55s — the browser UI's mic starts on tap ("Tap to speak"), so a
+  hesitant patient gets disconnected. Auto-starting the mic vs. a
+  server-side keepalive is a product decision, now an open question
+  rather than an invented behavior. Also: the scratch probes this
+  diagnosis needed were deleted after the deployed verification
+  passed, per the Session Note's own instruction — they had been
+  committed in `18e21ab` despite being described as untracked, so
+  they remain recoverable from git history.
+
 - **Root `LICENSE`, `docs/architecture.md`, and a rewritten root
   `README.md`** (Next Up #2, first half — the buildable half of
   "Architecture diagram, README, demo video, submission assets"). The
@@ -2109,6 +2171,13 @@ Update this file after every meaningful implementation change.
   check the Agent stack's current status and the two
   `DentalKnowledgeBaseId` / `CosmeticKnowledgeBaseId` outputs before
   touching anything here.*
+  *Checked (2026-09-13, before that session's Agent-stack redeploy):
+  `UPDATE_COMPLETE`, both KB outputs present and non-empty
+  (`DentalKnowledgeBaseId=M0D7TEPXQE`,
+  `CosmeticKnowledgeBaseId=PXQIJGOPPK`). The swap completed as part
+  of the reported deploy; this section is resolved and retained for
+  the two durable facts it records (the create-only-property trap and
+  the Titan quota root cause).*
 
 ## Next Up
 
@@ -2196,12 +2265,21 @@ accordingly.
    basic-flow credentials, presign, socket open, handshake accepted,
    and a real Nova Sonic connection (`bidi_connection_start`,
    input tokens growing).
-   **What remains is one live bug: the agent never speaks.** No
-   transcript or audio comes back within 45s (output tokens pinned at
-   0). Diagnosed locally against real Nova Sonic — see the Session
-   Note "The greeting silence" for the full state and how to resume.
-   Then the real browser session, cleanup of the two scratch probes,
-   and this item is done.
+   **The greeting-silence bug is fixed and verified live (2026-09-13).**
+   Root cause: Nova Sonic answers a turn only during an *active voice
+   session* — an audio input container that is open — so the stage
+   direction sent before any audio existed was accepted and never
+   answered. `voice.greet` now primes the audio container with 1s of
+   silence before `OPENING_TURN`; the Agent stack was redeployed and
+   answered the live probe with a spoken greeting (see Session Notes,
+   "The greeting silence"). The scratch probes were cleaned up after
+   that verification. **What remains is the human check and one
+   product decision**: a real browser session (a person listening and
+   speaking — no probe substitutes for hearing the agent), and what
+   happens when the patient never taps the mic — Nova Sonic times out
+   at 55s of no input after the greeting, so the UI should either
+   auto-start the mic on connect or keep the stream alive (an open
+   question, not decided here).
 2. **Escalation email notifications** — when the agent creates an
    escalation, notify clinic staff by email (SES) so an escalation is
    actionable without watching the dashboard.
@@ -2239,6 +2317,18 @@ accordingly.
    only the user can do.
 
 ## Open Questions
+
+- **What happens when a connected patient never taps the mic?** Nova
+  Sonic times a connection out at 55s without input ("gaps between
+  audio bytes and interactive content are less than 55 seconds" —
+  observed live, see Session Notes "The greeting silence"). The voice
+  UI's orb says "Tap to speak", so a patient who listens to the
+  greeting and hesitates gets silently disconnected just under a
+  minute in. Two options: auto-start the mic on connect (the vendored
+  sample's shape — the caller is heard the whole time), or have the
+  server keep the stream alive with periodic silence after the
+  greeting. Product feel vs. simplicity; needs the user's call before
+  the voice UI can be called done.
 
 - ~~**What is the shape of a clinic's `hours` and `services`
   config?**~~ **Resolved** — specified in `architecture.md` ->
@@ -2959,41 +3049,65 @@ accordingly.
 
 ## Session Notes
 
-- **The greeting silence: Nova Sonic does not answer the opening text
-  turn (2026-09-13, diagnosis in progress).** After the handshake
+- **The greeting silence: root cause found and fixed (2026-09-13).**
+  Nova Sonic answers a turn **only during an active voice session** —
+  an audio input container that is open and streaming. Probes against
+  the real model, in order (`backend/scratch_*.py`, scratch, untracked):
+  1. Bare interactive text turn (`OPENING_TURN` before any audio):
+     *accepted, never answered* — input tokens grow, output pinned at
+     0. This was the deployed bug: `Greeting.start` fired the stage
+     direction immediately after `BidiAgent.run` started, before any
+     browser audio had opened the audio container.
+  2. Real speech (Polly-synthesized PCM) then `contentEnd` on the
+     audio container: speech *detected* (`userSpeechStart`, 150 speech
+     tokens) but no answer — the server then timed out at 55s waiting
+     for "audio bytes or interactive content". **`contentEnd` is not
+     how a turn ends**; endpointing happens *inside* an open audio
+     stream (which is why the vendored sample, whose browser streams
+     mic audio continuously, never hits this).
+  3. Speech, then silence, container never closed: full answer —
+     final user transcript, assistant text, audio chunks.
+  4. **The fix, proven**: 1s of silence chunks (opens the container)
+     then the text turn then *nothing more sent* — the greeting comes
+     back ("Good morning, and welcome to Bright Smile Dental…").
+  Fix: `voice.greet` now sends `SILENT_PRIMING_CHUNKS` (10 × 100ms of
+  16kHz silence, `SILENT_PRIMING_AUDIO`) before `OPENING_TURN`, so the
+  greeting is answerable whether or not the caller's own audio has
+  started. Both interfaces get it for free since both use `Greeting`.
+  Pinned by `test_the_greeting_opens_the_audio_container_before_it_speaks`;
+  `ScriptedBidiModel.send` gained the real model's rule (audio alone
+  releases no scripted response) so the priming chunks don't consume
+  the script. Verified three ways: against the real model with the
+  production `greet` itself (locally), through the full backend suite,
+  and **live over the deployed runtime** after redeploying the Agent
+  stack (2026-09-13) — the probe received the spoken greeting
+  ("Good morning, thank you for calling Bright Smile Dental…") with
+  output tokens finally moving (21 on the first response). The scratch
+  probes (`backend/scratch_*`, `hello_speech.pcm`) and
+  `frontend/probe-handshake.mjs` were deleted after that verification
+  — they had been committed in `18e21ab`, so they remain recoverable
+  from git history.
+  **Known behavior, not fixed here**: with no further input after the
+  greeting, Nova Sonic times the connection out at 55s ("gaps between
+  audio bytes … less than 55 seconds"). A browser whose mic is off
+  will hit it; the voice UI should auto-start the mic (or the agent
+  keep the stream alive) — belongs to the voice-UI item's remaining
+  browser-session work, not to the greeting.
+  Scratch probes deleted after deployed verification passed:
+  `backend/scratch_*.py`, `backend/scratch_*.log`,
+  `backend/hello_speech.pcm`, `frontend/probe-handshake.mjs`.
+
+- **(Superseded — see the entry above.)** After the handshake
   protocol was deployed, the end-to-end probe (`frontend/
   probe-handshake.mjs`) proved the whole wire chain — credentials,
   presign, socket, handshake, a real Nova Sonic connection — but no
   transcript or audio ever came back (output tokens pinned at 0 over
-  45s). Reproduced **locally** with `backend/scratch_text_turn.py`
-  against the real model (no container involved), so the deployed
-  container is healthy and the bug is in what we send:
-  1. A bare interactive text turn (`OPENING_TURN` →
-     `contentStart(TEXT, USER, interactive=true)` + `textInput` +
-     `contentEnd`) is *accepted* — input tokens grow — but the model
-     never responds. This exactly matches the deployed behavior.
-  2. A 200ms silence audio chunk followed by closing the audio
-     container (turn end) *also* produced no output (150 speech
-     input tokens, output still 0) — though only silence was sent, so
-     endpointing on zero speech may legitimately see no turn to
-     answer.
-  **Not the cause:** the two `Traceback` events in the runtime log
-  group are an `awscrt` `InvalidStateError` fired during teardown
-  when the probe's timeout closed the socket — a red herring.
-  **Where to resume:** the open question is what provokes Nova
-  Sonic's first output turn. Candidates: real speech audio (test with
-  an actual spoken utterance, not silence); a longer/real audio turn
-  followed by text; or dropping the proactive greeting and letting
-  the browser play a canned greeting while the agent waits for the
-  patient's first speech (the vendored sample never greets — the
-  caller speaks first, and `Greeting` was only ever tested against
-  the fake model). Nova 2 docs describe interactive text as
-  "cross-modal input … during an active voice session", which hints
-  text may not provoke output before any audio exists. Test by
-  editing `backend/scratch_text_turn.py` (scratch, untracked — not
-  app code) and rerunning; verify the deployed path with
-  `frontend/probe-handshake.mjs` (also scratch, untracked) after any
-  `agentcore_app.py`/`voice.py` change and Agent-stack redeploy.
+  45s). Reproduced locally with `backend/scratch_text_turn.py` against
+  the real model (no container involved), so the deployed container
+  was healthy and the bug was in what we sent. Also recorded here
+  because it ruled a red herring out: the two `Traceback` events in
+  the runtime log group were an `awscrt` `InvalidStateError` fired
+  during teardown when the probe's timeout closed the socket.
 
 - **Two live-deploy facts about the patient guest voice path
   (2026-09-13), both verified against the deployed stacks, both fixed
