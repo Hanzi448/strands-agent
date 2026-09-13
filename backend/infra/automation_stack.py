@@ -20,10 +20,13 @@ Work). `tools/automation.py` (`run_daily_scan`) and
     `UpdateItem` on `Appointments` (the `by-patient` and `by-start-time`
     indexes, plus the reminder-list write), `GetItem` on `Patients`,
     `PutItem` on `Escalations`, and `ses:SendEmail` scoped to this
-    account/region's verified identities (`code-standards.md` -> AWS CDK
-    forbids a blanket resource/action grant; the identity itself is
-    verified manually outside CDK, so its ARN cannot be pinned here --
-    see `progress-tracker.md` -> Open Questions).
+    account/region's verified identities -- one grant serving both the
+    reminder send and `escalations._send_staff_email`, which this
+    Lambda reaches through the same `create_escalation` call that
+    writes the row (`code-standards.md` -> AWS CDK forbids a blanket
+    resource/action grant; the identity itself is verified manually
+    outside CDK, so its ARN cannot be pinned here -- see
+    `progress-tracker.md` -> Open Questions).
 """
 
 from __future__ import annotations
@@ -38,7 +41,7 @@ from aws_cdk import aws_lambda as lambda_
 from aws_cdk import aws_scheduler as scheduler
 from constructs import Construct
 
-from config import DEMO_CLINIC_IDS, ProjectConfig
+from config import DEMO_CLINIC_IDS, VERIFIED_SES_ADDRESS, ProjectConfig
 
 # Where the Lambda's code comes from -- one directory up from this stack's
 # own file, since `backend/` (not `backend/infra/`) is where `lambda/` and
@@ -143,13 +146,18 @@ class AutomationStack(Stack):
                 # same two variables `agent_stack.py`'s runtime sets.
                 "CLINICPILOT_PROJECT_PREFIX": self.config.project_prefix,
                 "CLINICPILOT_ENV": self.config.environment,
-                # `tools.automation.REMINDER_SENDER_ENV`. SES stays in
-                # sandbox mode for the demo, so this address must be a
-                # *verified* SES identity in this account/region -- and in
-                # sandbox every recipient must be verified too, which is why
-                # the demo sends to the same address it sends from
-                # (`progress-tracker.md` -> Session Notes).
-                "CLINICPILOT_REMINDER_SENDER_EMAIL": "salaheenhanzala624@gmail.com",
+                # `tools.automation.REMINDER_SENDER_ENV` and
+                # `tools.escalations.py`'s two notification addresses
+                # (`ESCALATION_SENDER_ENV` / `ESCALATION_RECIPIENT_ENV`,
+                # reached from this Lambda through the same
+                # `create_escalation` call that writes the row). SES
+                # stays in sandbox mode for the demo, so all three must
+                # be verified identities in this account/region -- which
+                # is why the demo sends to the same address it sends
+                # from (`progress-tracker.md` -> Session Notes).
+                "CLINICPILOT_REMINDER_SENDER_EMAIL": VERIFIED_SES_ADDRESS,
+                "CLINICPILOT_ESCALATION_SENDER_EMAIL": VERIFIED_SES_ADDRESS,
+                "CLINICPILOT_ESCALATION_RECIPIENT_EMAIL": VERIFIED_SES_ADDRESS,
             },
         )
 
@@ -182,14 +190,17 @@ class AutomationStack(Stack):
                 iam.PolicyStatement(sid=sid, actions=actions, resources=resources)
             )
 
-        # `automation._send_reminder_email`. Scoped to the identity
-        # resource type in this account/region, not to `*` -- the same
-        # "resource type, not one ARN" tradeoff `agent_stack.py` documents
-        # for `foundation-model/*`, since the verified sender identity is
-        # created manually outside CDK and its ARN cannot be pinned here.
+        # `automation._send_reminder_email` and
+        # `escalations._send_staff_email` -- one SES grant for both
+        # sends this Lambda can make. Scoped to the identity resource
+        # type in this account/region, not to `*` -- the same "resource
+        # type, not one ARN" tradeoff `agent_stack.py` documents for
+        # `foundation-model/*`, since the verified sender identity is
+        # created manually outside CDK and its ARN cannot be pinned
+        # here.
         function.add_to_role_policy(
             iam.PolicyStatement(
-                sid="SendReminderEmail",
+                sid="SendSesEmail",
                 actions=["ses:SendEmail", "ses:SendRawEmail"],
                 resources=[f"arn:aws:ses:{self.region}:{self.account}:identity/*"],
             )

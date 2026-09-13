@@ -137,6 +137,14 @@ Update this file after every meaningful implementation change.
   frontend code changed and the stack takes nothing from the api/agent
   stacks. `cdk synth` verifies it alone and as part of all five; only
   the actual deploy remains. See Completed.
+- **Escalations now reach staff by email as well as the dashboard.**
+  `create_escalation` sends a best-effort SES notification after the
+  write (the record never depends on the email), configured by two env
+  vars the Agent and Automation stacks now set to the shared
+  `config.VERIFIED_SES_ADDRESS`; the agent runtime role gained the
+  matching scoped SES grant. Both halves verified offline — **781
+  tests**, `cdk synth` with both templates inspected. Only the
+  redeploy and a real send remain. See Completed.
 
 ## Current Goal
 
@@ -178,6 +186,62 @@ Update this file after every meaningful implementation change.
 
 ## Completed
 
+- **Escalation email notifications** (old Next Up #2, both halves —
+  `project-overview.md`'s "Escalation to staff (email + dashboard)" and
+  success criterion 3's "one staff escalation (email + dashboard)").
+  Two units, split the way `ai-workflow-rules.md` -> When to Split
+  Work splits every tool/infra pair; both verified offline.
+  **The tool half: `escalations.py` sends a staff notification email
+  after the write, inside `create_escalation` itself.** One
+  implementation serves both paths (the voice agent's Escalation
+  sub-agent and the background Lambda), per Invariants #3 — the send
+  lives in the tool layer, not in either caller. It is held to the
+  module's founding rule that creating an escalation must not acquire
+  a way to fail: the `put_item` lands first, then `_notify_staff` runs
+  best-effort — no addresses configured, SES rejecting the send, or
+  the SDK raising all cost the email and nothing else (a deliberately
+  broad `except Exception` around the send, the decoration never
+  escaping into the path that records the escalation). Configuration
+  is two env vars, `CLINICPILOT_ESCALATION_SENDER_EMAIL` and
+  `CLINICPILOT_ESCALATION_RECIPIENT_EMAIL` — both required or no
+  email is sent, silently, unlike `automation`'s reminder sender env
+  (which raises `ConfigurationError`) because here the dashboard half
+  of the feature must not depend on the email half. The email carries
+  what a staff member needs to find the queue card — clinic, full
+  reason, source, escalation id, and each back-reference when present
+  — with the reason truncated in the subject.
+  **The infra half: the agent runtime role can now send, and both
+  stacks carry the addresses.** `agent_stack.py` gained
+  `ses:SendEmail`/`ses:SendRawEmail` on
+  `arn:aws:ses:{region}:{account}:identity/*` (the same
+  "resource type, not one ARN" tradeoff `automation_stack.py` already
+  documented — the identity is verified manually outside CDK);
+  `automation_stack.py`'s existing grant was already sufficient and
+  its sid/comment now name both sends it serves. The address itself
+  moved to `config.VERIFIED_SES_ADDRESS` (one place, per
+  `code-standards.md` — it was hardcoded in `automation_stack.py`
+  before), and both stacks set both env vars to it: SES sandbox
+  requires every recipient verified, so the demo sends to the same
+  address it sends from — the choice the reminder path already made.
+  TDD on the tool half: the five new tests were written first and
+  watched fail — the send fires only after the write with the stored
+  item's fields, a rejected send neither raises nor loses the
+  escalation, unconfigured addresses send nothing without error, and
+  the address pair resolves as both-or-nothing with whitespace
+  trimming (the tests stub `_send_staff_email` at the same seam
+  `test_automation.py` stubs `_send_reminder_email`; no boto3 client
+  is ever built).
+  Verified: **781 passed** (776 before, 5 new); `cdk synth` for all
+  five stacks, with both stacks' templates inspected directly — the
+  Agent runtime role's `SendEscalationEmail` statement and env vars,
+  and the Automation Lambda's `SendSesEmail` statement and three
+  email env vars, all present and scoped to `identity/*` in this
+  account/region.
+  **Not verified, and cannot be here**: a real send and a real email
+  in an inbox — it needs the Agent and Automation stacks redeployed
+  (folded into Next Up #4) and an escalation actually raised; SES
+  sandbox sends from and to `VERIFIED_SES_ADDRESS`, which is already
+  the verified identity the reminder path uses.
 - **The frontend hosting stack** (`backend/infra/frontend_stack.py`,
   old Next Up #3 — the last empty stack skeleton in the CDK app). One
   module, no new dependencies (`aws-s3-deployment` ships inside
@@ -2390,6 +2454,14 @@ which needs the same credentials and deployed stacks Next Up #1's actual
 `cdk deploy` does. See Completed. The numbered list is renumbered
 accordingly.
 
+The old #2 ("Escalation email notifications") has been completed in
+full, across its two halves split by `ai-workflow-rules.md` -> When to
+Split Work (Python logic and its CDK deployment are separate steps):
+the tool half (`escalations.py`'s best-effort `_notify_staff` after the
+write) and the infra half (the agent runtime role's SES grant plus the
+shared `config.VERIFIED_SES_ADDRESS` both stacks now read). All in
+Completed below; the numbered list is renumbered accordingly.
+
 1. **Patient voice UI** — `frontend/src/voice/`: clinic picker, presigned
    WebSocket to the deployed `/ws` (guest identity-pool credentials),
    mic capture + audio playback, live transcript, voice orb.
@@ -2439,17 +2511,14 @@ accordingly.
    **What remains is the human check only**: a real browser session —
    a person listening and speaking, no probe substitutes for hearing
    the agent — with the auto-started mic behind it.
-2. **Escalation email notifications** — when the agent creates an
-   escalation, notify clinic staff by email (SES) so an escalation is
-   actionable without watching the dashboard.
-3. **AgentCore Memory** — session state per `architecture.md`, so the
+2. **AgentCore Memory** — session state per `architecture.md`, so the
    voice agent remembers context across a call (and optionally across
    calls) without process-level state.
-4. **Settings tab** — editable hours and services (user decision,
+3. **Settings tab** — editable hours and services (user decision,
    2026-09-12): staff edit hours/closures/services in the dashboard,
    writing to the Clinics table. Needs a new authenticated write route
    plus validation — backend unit first, then its frontend half.
-5. Deploy `agentcore_app.py` to the AgentCore Runtime and verify one
+4. Deploy `agentcore_app.py` to the AgentCore Runtime and verify one
    voice session end-to-end. **Status note (2026-09-12): the user
    reports the CDK deploy and seed have now been run and the frontend
    tested locally** — the "blocked in this environment" caveats that
@@ -2458,8 +2527,10 @@ accordingly.
    deployed `/ws` with a seeded clinic behind it), which item #1's UI is
    what makes possible. Whether the KB-swap resume steps in "In
    Progress" were part of the reported deploy is unconfirmed; read that
-   section before touching the Agent stack.
-6. **Demo video, live demo link, AWS Builder ID / builder.aws.com
+   section before touching the Agent stack. The Agent and Automation
+   stacks also now carry the escalation-email SES grant and env vars
+   (old #2) undeployed — redeploy both to make escalation emails live.
+5. **Demo video, live demo link, AWS Builder ID / builder.aws.com
    post.** The architecture diagram and README half of the old #2 is
    done (see Completed) — a root `LICENSE` (MIT) and
    `docs/architecture.md` (a Mermaid system diagram plus a reading
@@ -2470,7 +2541,7 @@ accordingly.
    submission checklist. The hosting stack's code is done too (the
    old #3, see Completed); what remains of this item is deploying it
    per the README's "Deploying" section for the live demo link
-   (`FrontendUrl` output), the verified voice session (#5) for
+   (`FrontendUrl` output), the verified voice session (#4) for
    something real to film, and an AWS Builder ID — an account signup
    only the user can do.
 

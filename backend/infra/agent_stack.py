@@ -88,7 +88,7 @@ from aws_cdk import aws_s3 as s3
 from aws_cdk import aws_s3vectors as s3vectors
 from constructs import Construct
 
-from config import DEMO_CLINIC_IDS, ProjectConfig
+from config import DEMO_CLINIC_IDS, VERIFIED_SES_ADDRESS, ProjectConfig
 from data_stack import kb_source_prefix
 
 # Cohere Embed English v3, whose output width is a fixed 1024 -- the same
@@ -435,6 +435,21 @@ class AgentStack(Stack):
                 iam.PolicyStatement(sid=sid, actions=actions, resources=resources)
             )
 
+        # `escalations._send_staff_email`, reached from this runtime via
+        # the Escalation sub-agent's `create_escalation` call. Scoped to
+        # the identity resource type in this account/region, not to `*`
+        # -- the same "resource type, not one ARN" tradeoff
+        # `automation_stack.py` documents for its own reminder send,
+        # since the verified SES identity is created manually outside
+        # CDK and its ARN cannot be pinned here.
+        runtime.add_to_role_policy(
+            iam.PolicyStatement(
+                sid="SendEscalationEmail",
+                actions=["ses:SendEmail", "ses:SendRawEmail"],
+                resources=[f"arn:aws:ses:{self.region}:{self.account}:identity/*"],
+            )
+        )
+
         CfnOutput(
             self,
             "AgentRuntimeArn",
@@ -463,6 +478,16 @@ class AgentStack(Stack):
             # docstring describes for local scripts.
             "CLINICPILOT_PROJECT_PREFIX": self.config.project_prefix,
             "CLINICPILOT_ENV": self.config.environment,
+            # `tools/escalations.py`'s two notification addresses
+            # (`ESCALATION_SENDER_ENV` / `ESCALATION_RECIPIENT_ENV`).
+            # SES stays in sandbox mode for the demo, so both must be
+            # verified identities in this account/region -- which is why
+            # the demo sends to the same address it sends from, the same
+            # choice `automation_stack.py` documents for reminders. When
+            # unset, `create_escalation` records the escalation and
+            # sends no email, so this is an enable, not a dependency.
+            "CLINICPILOT_ESCALATION_SENDER_EMAIL": VERIFIED_SES_ADDRESS,
+            "CLINICPILOT_ESCALATION_RECIPIENT_EMAIL": VERIFIED_SES_ADDRESS,
         }
         for clinic_id, kb_id in self.knowledge_base_ids.items():
             env[_knowledge_base_id_env_var(clinic_id)] = kb_id

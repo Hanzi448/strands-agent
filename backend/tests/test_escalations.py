@@ -361,6 +361,131 @@ def test_an_unresolvable_back_reference_still_records_the_escalation(table) -> N
     assert fake.queries == []
 
 
+# --------------------------------------------------------------------------
+# The staff notification email
+# --------------------------------------------------------------------------
+
+
+@pytest.fixture
+def staff_email(
+    monkeypatch: pytest.MonkeyPatch,
+) -> list[dict[str, Any]]:
+    """Configure the notification addresses and record every send call.
+
+    The send is stubbed at the same seam `test_automation.py` stubs
+    `_send_reminder_email`: no boto3 client is ever built.
+    """
+    monkeypatch.setenv(escalations.ESCALATION_SENDER_ENV, "staff@clinicpilot.demo")
+    monkeypatch.setenv(escalations.ESCALATION_RECIPIENT_ENV, "owner@gmail.com")
+    calls: list[dict[str, Any]] = []
+
+    def record(item: dict[str, Any]) -> bool:
+        calls.append(dict(item))
+        return True
+
+    monkeypatch.setattr(escalations, "_send_staff_email", record)
+    return calls
+
+
+def _arm_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make the send raise, as SES rejecting it would."""
+
+    def reject(item: dict[str, Any]) -> bool:
+        raise ClientError(
+            {"Error": {"Code": "MessageRejected", "Message": "sandbox"}},
+            "SendEmail",
+        )
+
+    monkeypatch.setenv(escalations.ESCALATION_SENDER_ENV, "staff@clinicpilot.demo")
+    monkeypatch.setenv(escalations.ESCALATION_RECIPIENT_ENV, "owner@gmail.com")
+    monkeypatch.setattr(escalations, "_send_staff_email", reject)
+
+
+def test_create_sends_a_staff_notification_email_after_the_write(
+    table, staff_email
+) -> None:
+    """`project-overview.md`: escalation reaches staff by email *and* dashboard."""
+    fake = table()
+    escalations.create_escalation(
+        DENTAL_ID,
+        "Patient asked for a refund of a paid appointment.",
+        patient_id="pat_1",
+        appointment_id="apt_1",
+        source="voice",
+    )
+    assert len(staff_email) == 1
+    sent = staff_email[0]
+    assert sent["clinic_id"] == DENTAL_ID
+    assert sent["reason"] == "Patient asked for a refund of a paid appointment."
+    assert sent["source"] == "voice"
+    assert sent["patient_id"] == "pat_1"
+    assert sent["appointment_id"] == "apt_1"
+    # The record exists: the email advertises a queue card, it is not the
+    # record itself.
+    assert fake.puts
+
+
+def test_a_rejected_send_does_not_fail_the_escalation(table, monkeypatch) -> None:
+    """SES refusing must not lose the escalation -- the item is the record."""
+    fake = table()
+    _arm_failure(monkeypatch)
+    result = escalations.create_escalation(DENTAL_ID, "Complaint about wait times.")
+    assert fake.stored(result["escalation_id"])["status"] == "open"
+    assert result["reason"] == "Complaint about wait times."
+
+
+def test_no_email_is_sent_when_the_addresses_are_not_configured(
+    table, monkeypatch
+) -> None:
+    """An unconfigured deployment still records escalations, just silently."""
+    monkeypatch.delenv(escalations.ESCALATION_SENDER_ENV, raising=False)
+    monkeypatch.delenv(escalations.ESCALATION_RECIPIENT_ENV, raising=False)
+
+    def bomb(item: dict[str, Any]) -> bool:
+        raise AssertionError("no send should be attempted without addresses")
+
+    monkeypatch.setattr(escalations, "_send_staff_email", bomb)
+    fake = table()
+    escalations.create_escalation(DENTAL_ID, "Clinical question.")
+    assert fake.puts
+
+
+def test_notification_addresses_require_both_halves(monkeypatch) -> None:
+    """Sender and recipient are one configuration; half of it is none of it."""
+    cases = [
+        ("owner@gmail.com", "owner@gmail.com"),
+        ("owner@gmail.com", None),
+        (None, "owner@gmail.com"),
+        (None, None),
+    ]
+    for sender, recipient in cases:
+        for name, value in (
+            (escalations.ESCALATION_SENDER_ENV, sender),
+            (escalations.ESCALATION_RECIPIENT_ENV, recipient),
+        ):
+            if value is None:
+                monkeypatch.delenv(name, raising=False)
+            else:
+                monkeypatch.setenv(name, value)
+        addresses = escalations._notification_addresses()
+        if sender and recipient:
+            assert addresses == (sender, recipient)
+        else:
+            assert addresses is None
+
+
+def test_notification_addresses_are_trimmed(monkeypatch) -> None:
+    """A shell profile exporting whitespace is exporting nothing."""
+    monkeypatch.setenv(
+        escalations.ESCALATION_SENDER_ENV, "  staff@clinicpilot.demo  "
+    )
+    monkeypatch.setenv(escalations.ESCALATION_RECIPIENT_ENV, " owner@gmail.com ")
+    assert escalations._notification_addresses() == (
+        "staff@clinicpilot.demo",
+        "owner@gmail.com",
+    )
+
+
 @pytest.mark.parametrize("reason", ["", "   ", None])
 def test_an_escalation_with_no_reason_is_refused(reason, table) -> None:
     """A human reads this to decide what to do; an empty one tells them nothing."""

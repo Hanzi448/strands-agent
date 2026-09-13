@@ -14,7 +14,9 @@ nothing it does not have to: `patient_id` and `appointment_id` are stored
 as given, unverified. Checking that they resolve would mean a stale
 reference could stop the escalation being recorded at all, and a
 mis-referenced escalation a human can still read beats a correct one that
-was never written.
+was never written. The staff notification email below is held to the same
+rule: it is sent after the write, best-effort, and a rejected send (or an
+unconfigured one) loses nothing but the email itself.
 
 **Resolving one is not idempotent, deliberately.** Marking an
 already-resolved escalation resolved again raises `ConflictError` rather
@@ -36,6 +38,7 @@ or resolve one.
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 from .dynamo import escalations_table
@@ -67,6 +70,20 @@ from .validation import (
 DEFAULT_ESCALATION_LIMIT = 50
 MAX_ESCALATION_LIMIT = 100
 
+# The staff notification email's two addresses. Both must be set or no
+# email is sent -- silently, unlike `tools.automation`'s sender env,
+# because here an unconfigured deployment must still record escalations
+# (`project-overview.md` wants email *and* dashboard, and the dashboard
+# half must not depend on the email half). SES sandbox requires every
+# recipient verified, so the demo sends to the same verified address it
+# sends from (`architecture.md` -> Stack, "Email Escalation").
+ESCALATION_SENDER_ENV: str = "CLINICPILOT_ESCALATION_SENDER_EMAIL"
+ESCALATION_RECIPIENT_ENV: str = "CLINICPILOT_ESCALATION_RECIPIENT_EMAIL"
+
+# A subject a person scans in an inbox: enough of the reason to recognise
+# the case, never a wall of text (the full reason is in the body).
+_SUBJECT_REASON_LIMIT = 80
+
 
 def create_escalation(
     clinic_id: str,
@@ -87,7 +104,10 @@ def create_escalation(
 
     The escalation is recorded immediately and staff pick it up from the
     dashboard, so tell the patient that a member of staff will follow up --
-    never that the thing they asked for has been done.
+    never that the thing they asked for has been done. When the SES
+    addresses are configured, a notification email follows the write,
+    best-effort: a rejected or unconfigured send loses the email and
+    nothing else.
 
     Args:
         clinic_id: The clinic the caller is talking to. Required; never
@@ -154,7 +174,105 @@ def create_escalation(
         # fresh uuid4, so this can only fire on a genuine bug.
         ConditionExpression=Attr(EscalationAttrs.ESCALATION_ID).not_exists(),
     )
+    # Only now that the record exists: the email advertises a queue
+    # card, it is not the record. Every way this can go wrong -- no
+    # addresses configured, SES rejecting the send, the SDK raising --
+    # costs the email and nothing else.
+    _notify_staff(item)
     return item
+
+
+def _notification_addresses() -> tuple[str, str] | None:
+    """The SES sender and recipient for staff notifications, or None.
+
+    Both halves must be present: half an address pair is not a
+    configured email, it is a misconfiguration that would send from or
+    to nowhere. Whitespace counts as unset, as everywhere else in this
+    layer -- that is how a shell profile exports nothing.
+    """
+    sender = os.environ.get(ESCALATION_SENDER_ENV, "").strip()
+    recipient = os.environ.get(ESCALATION_RECIPIENT_ENV, "").strip()
+    if not sender or not recipient:
+        return None
+    return sender, recipient
+
+
+def _send_staff_email(item: dict[str, Any]) -> bool:
+    """Send one staff notification email via SES.
+
+    Returns:
+        `True` if SES accepted the send, `False` if it did not. Not
+        raised as an exception -- the caller treats both the same way,
+        which is the whole point of the function's existence.
+    """
+    # Lazy, mirroring `dynamo._dynamodb_resource`: importing this module
+    # must not require the AWS SDK.
+    import boto3  # noqa: PLC0415
+    from botocore.exceptions import BotoCoreError, ClientError  # noqa: PLC0415
+
+    addresses = _notification_addresses()
+    if addresses is None:
+        return False
+    sender, recipient = addresses
+
+    reason = str(item[EscalationAttrs.REASON])
+    subject_reason = (
+        reason if len(reason) <= _SUBJECT_REASON_LIMIT
+        else f"{reason[:_SUBJECT_REASON_LIMIT - 1]}…"
+    )
+    lines = [
+        "A new escalation needs a staff decision.",
+        "",
+        f"Clinic: {item[EscalationAttrs.CLINIC_ID]}",
+        f"Reason: {reason}",
+        f"Raised by: {item[EscalationAttrs.SOURCE]}",
+        f"Escalation id: {item[EscalationAttrs.ESCALATION_ID]}",
+    ]
+    # Omitted rather than written as "None": the same rule the item
+    # itself follows for its back-references.
+    if EscalationAttrs.PATIENT_ID in item:
+        lines.append(f"Patient: {item[EscalationAttrs.PATIENT_ID]}")
+    if EscalationAttrs.APPOINTMENT_ID in item:
+        lines.append(f"Appointment: {item[EscalationAttrs.APPOINTMENT_ID]}")
+    lines += [
+        "",
+        "Open the staff dashboard to resolve it.",
+    ]
+
+    try:
+        boto3.client("ses").send_email(
+            Source=sender,
+            Destination={"ToAddresses": [recipient]},
+            Message={
+                "Subject": {
+                    "Data": (
+                        f"Escalation at {item[EscalationAttrs.CLINIC_ID]}: "
+                        f"{subject_reason}"
+                    )
+                },
+                "Body": {"Text": {"Data": "\n".join(lines)}},
+            },
+        )
+        return True
+    except (ClientError, BotoCoreError):
+        return False
+
+
+def _notify_staff(item: dict[str, Any]) -> None:
+    """Best-effort: tell staff an escalation exists, whatever happens.
+
+    The seam the tests stub. A send that raises is swallowed here, not
+    in `create_escalation` -- recording the escalation is the critical
+    act and this is the decoration on it.
+    """
+    if _notification_addresses() is None:
+        return
+    try:
+        _send_staff_email(item)
+    except Exception:  # noqa: BLE001
+        # Deliberately broad: no failure mode of a notification may
+        # escape into the path that records the escalation.
+        return
 
 
 def list_open_escalations(clinic_id: str, limit: object = None) -> list[dict[str, Any]]:

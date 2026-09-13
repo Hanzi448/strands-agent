@@ -35,6 +35,14 @@ DEMO_CLINIC_IDS: tuple[str, ...] = ("clinic-dental", "clinic-cosmetic")
 # to a human, so it carries its display casing rather than the slug's.
 DEFAULT_STACK_PREFIX = "ClinicPilot"
 
+# The manually-verified SES identity every demo email goes from (and,
+# because SES is in sandbox mode, also to -- every recipient must be
+# verified too). It is a deployment fact shared by the agent and
+# automation stacks, so it lives here rather than being spelled in
+# either. `architecture.md` -> Stack keeps SES in sandbox for the demo;
+# success criterion 5 exempts the identity itself from CDK.
+VERIFIED_SES_ADDRESS = "salaheenhanzala624@gmail.com"
+
 
 @dataclass(frozen=True)
 class ProjectConfig:
