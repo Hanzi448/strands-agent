@@ -212,6 +212,34 @@ Update this file after every meaningful implementation change.
 
 ## Completed
 
+- **Fixed the deployed runtime refusing every call with ImportError,
+  and dropped production from the pre-submission path** (2026-09-14).
+  The user's first voice-UI attempt at the deployed frontend showed
+  "Something went wrong during the call"; the runtime's CloudWatch
+  log had `cannot import name 'BidiNovaSonicModel'` raised from
+  `agents/voice.py`'s `build_nova_sonic_model`, closed to the browser
+  as 1011. Root cause, found in the 1.55.1 wheel itself: the Agent
+  stack's same-day redeploy (the memory namespace fix) rebuilt the
+  container from scratch, and the floating `strands-agents[bidi]>=1.54`
+  floor resolved to 1.55.1 — released since the previous build —
+  which renames the class to `BedrockNovaSonicModel` behind a lazy
+  `__getattr__`. The local venv (1.54.0) and yesterday's container
+  predate the rename, which is why everything offline and everything
+  live until that rebuild had worked. Fix: `requirements.txt` now caps
+  the requirement at the tested minor,
+  `strands-agents[bidi]>=1.54,<1.55`, with a comment naming the
+  rename, its date, and the adopt-the-rename-as-its-own-change rule.
+  The Agent stack was redeployed (Docker rebuild, runtime ARN
+  unchanged), and a scratch live probe through the real guest path —
+  Cognito basic-flow credentials, SigV4 presign, WebSocket open,
+  clinic handshake, spoken greeting with audio back — passed
+  ("Good morning, this is Bright Smile Dental…") and was deleted.
+  Same session, the user decided **the dev deployment is the
+  submission**: prod stacks moved to the post-hackathon roadmap (see
+  Next Up #2 and Open Questions) — a live link and a demo video are
+  what the hackathon wants, and both already point at the deployed
+  dev FrontendUrl.
+
 - **The Settings tab, both halves, deployed and live-verified** (old
   Next Up #2 — the user's 2026-09-12 decision, scoped with them this
   session to all four editable fields, any staff login). Staff can now
@@ -2735,7 +2763,37 @@ Completed. The numbered list is renumbered accordingly.
    check needs the quota back (yesterday's pattern: worked, then
    throttled, then resets — reset time unconfirmed, midnight UTC
    the usual suspect).
-2. **The remaining voice-session verification, then production.**
+   **Incident fixed (2026-09-14): the deployed runtime refused every
+   call with ImportError.** The user's first browser attempt showed
+   "Something went wrong during the call"; CloudWatch had
+   `cannot import name 'BidiNovaSonicModel'` from `voice.py`'s
+   `start_voice_call` path. Root cause: the Agent stack's same-day
+   redeploy (the memory namespace fix) rebuilt the container from
+   scratch, and the unpinned `strands-agents[bidi]>=1.54` resolved to
+   the just-released 1.55.1, which renames the class to
+   `BedrockNovaSonicModel`. Fix: the requirement is now
+   `strands-agents[bidi]>=1.54,<1.55` (capped at the tested minor,
+   with a comment naming the rename and its date), the Agent stack was
+   redeployed (runtime ARN unchanged), and a scratch live probe
+   through the real guest path — basic-flow credentials, presign,
+   handshake, greeting audio back — passed and was deleted. Lesson: a
+   floating dependency floor makes every container rebuild a silent
+   upgrade; the cap pins it. The human check can proceed against the
+   deployed URL right now (greeting half; the sub-agent half still
+   waits on the token quota).
+2. **The remaining voice-session verification, then the demo video —
+   production is out of the pre-submission path.**
+   **User decision (2026-09-14): the dev deployment is the
+   submission.** The hackathon needs a live link and a demo video, and
+   the deployed dev FrontendUrl
+   (`https://d16aixkgixx5o6.cloudfront.net`) is both already — a
+   second, prod-named copy of every stack would add an hour of
+   deploys, a fresh round of quota risk, a second environment to
+   debug, and nothing a judge could see. Production deployment moves
+   to the post-hackathon roadmap (the SaaS direction, Open Questions).
+   What stays in the pre-submission path: keep the dev stacks up
+   through judging (do not tear down after recording), and record the
+   video against the deployed URL, never localhost.
    The dev deploy (2026-09-14) covered everything that was waiting:
    the Agent stack now carries the AgentCore Memory resource and
    `CLINICPILOT_MEMORY_ID` (after the namespace fix, see Completed),
@@ -2748,9 +2806,9 @@ Completed. The numbered list is renumbered accordingly.
    the hackathon's live demo link). What remains is what a deploy
    cannot do: **one real voice session a person listens to** (item
    #1's human check, which can now run against the deployed frontend
-   rather than a local dev server), and then — the user's stated order
-   (2026-09-14) — the **production** stacks (`CLINICPILOT_ENV=prod`),
-   which wait until after the voice check.
+   rather than a local dev server) — after the ImportError fix above,
+   the runtime answers again (probe-verified), so only the quota
+   timing gates the sub-agent half.
 3. **Demo video, AWS Builder ID / builder.aws.com post.** The
    architecture diagram and README half of the old #2 is done (see
    Completed), and the live demo link now exists (the deployed
@@ -2772,7 +2830,11 @@ Completed. The numbered list is renumbered accordingly.
   numbers / real telephony (Amazon Connect), external calendar
   integration (the diary currently lives only in DynamoDB),
   per-clinic branding/location/config UI (beyond the Settings tab),
-  billing, and production observability. Not an open question — a
+  billing, and production observability — plus the **production
+  stacks** (`CLINICPILOT_ENV=prod`), dropped from the pre-submission
+  path by the user's 2026-09-14 decision (see Next Up #2): the dev
+  deployment is the hackathon's live link, and prod naming buys
+  nothing a judge can see. Not an open question — a
   direction, deliberately out of scope until submission.
 
 - ~~**What happens when a connected patient never taps the mic?**~~

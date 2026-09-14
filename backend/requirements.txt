@@ -9,7 +9,14 @@ boto3>=1.35
 # leaves out. `BidiAgent` itself does not, so `agents/voice.py` imports
 # the Sonic model at call time and everything else here installs and
 # tests without it.
-strands-agents[bidi]>=1.54
+#
+# Capped at the minor everything is tested against: 1.55 renames
+# `BidiNovaSonicModel` to `BedrockNovaSonicModel`
+# (`strands/experimental/bidi/models/bedrock.py`), and a floating floor
+# let a rebuild pick it up the day it shipped -- the deployed runtime
+# then refused every call with ImportError (2026-09-14). Adopt the
+# rename as its own change, with the local venv upgraded alongside.
+strands-agents[bidi]>=1.54,<1.55
 # The IANA timezone database. `zoneinfo` reads the system copy where there
 # is one (Lambda, Linux containers); Windows has none, so a clinic's
 # `timezone` would look misconfigured during local development without it.
