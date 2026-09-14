@@ -30,16 +30,27 @@ auth, SES escalation email, EventBridge daily scans, and the CloudFront
 frontend. The staff dashboard shows the seeded clinics' appointments and
 escalations; the patient voice UI takes real calls.
 
-Two demo tenants are seeded:
+Two demo tenants are seeded — same login password for both: `ClinicPilot123!`
 
-| Clinic | Login email (staff dashboard) |
-| --- | --- |
-| Bright Smile Dental | `staff+clinic-dental@clinicpilot.demo` |
-| Lumiere Aesthetics | `staff+clinic-cosmetic@clinicpilot.demo` |
+| Clinic | Staff dashboard login | Patient voice UI |
+| --- | --- | --- |
+| Bright Smile Dental | `staff+clinic-dental@clinicpilot.demo` / `ClinicPilot123!` | [Voice link](https://d16aixkgixx5o6.cloudfront.net/#/voice) |
+| Lumiere Aesthetics | `staff+clinic-cosmetic@clinicpilot.demo` / `ClinicPilot123!` | [Voice link](https://d16aixkgixx5o6.cloudfront.net/#/voice) |
 
-The password is the one configured at seed time via the
-`CLINICPILOT_STAFF_DEMO_PASSWORD` environment variable. The patient voice
-UI needs no login — open the link and allow microphone access.
+**Try the full loop as a judge:**
+
+1. Open the **patient voice UI** ([#/voice](https://d16aixkgixx5o6.cloudfront.net/#/voice))
+   — no login needed. Allow microphone access, pick a clinic, and talk
+   to the agent; ask "do you do whitening?" or try to book an
+   appointment.
+2. Open the **staff dashboard**
+   ([https://d16aixkgixx5o6.cloudfront.net](https://d16aixkgixx5o6.cloudfront.net))
+   and log in with a clinic's email + password from the table.
+3. You'll see the voice call's result on the dashboard: appointments
+   land on the calendar, and anything the agent escalated appears in the
+   escalation queue (staff also get an email the moment it's created).
+   The Settings tab shows the schedule configuration the voice agent
+   books against.
 
 > **Demo note**: the deployment runs on an AWS account with default
 > on-demand Bedrock quotas. Under heavy same-day use the live link may
