@@ -439,8 +439,19 @@ class AgentStack(Stack):
         # model and Nova Sonic's own model id are both still open
         # (`progress-tracker.md` -> Open Questions), threaded through a
         # runtime `model` argument this stack cannot read. Still scoped to
-        # one resource type in this account/region, per this module's own
-        # docstring -- not the blanket grant `code-standards.md` forbids.
+        # one resource type, per this module's own docstring -- not the
+        # blanket grant `code-standards.md` forbids.
+        #
+        # TWO resource shapes, because Bedrock authorizes the same
+        # foundation model against both (found live 2026-09-14: every
+        # booking failed with AccessDenied on
+        # `arn:aws:bedrock:::foundation-model/anthropic.claude-sonnet-4-6`
+        # -- Strands' default `global.*` inference profile resolves to
+        # that region-less ARN, which the region-scoped form below can
+        # never match; Nova Sonic's bidirectional stream, by contrast,
+        # authorizes against the region-scoped form, which is why the
+        # voice half of every call worked while every sub-agent call
+        # died).
         runtime.add_to_role_policy(
             iam.PolicyStatement(
                 sid="InvokeBedrockFoundationModels",
@@ -449,7 +460,14 @@ class AgentStack(Stack):
                     "bedrock:InvokeModelWithResponseStream",
                     "bedrock:InvokeModelWithBidirectionalStream",
                 ],
-                resources=[f"arn:aws:bedrock:{self.region}::foundation-model/*"],
+                resources=[
+                    # Foundation-model ARNs carry no region or account;
+                    # this is their real shape, not a widened grant.
+                    "arn:aws:bedrock:::foundation-model/*",
+                    # The region-scoped shape the bidirectional stream
+                    # (and possibly other clients) evaluates against.
+                    f"arn:aws:bedrock:{self.region}::foundation-model/*",
+                ],
             )
         )
 

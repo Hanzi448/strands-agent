@@ -212,6 +212,57 @@ Update this file after every meaningful implementation change.
 
 ## Completed
 
+- **Fixed the booking sub-agent's foundation-model IAM denial and the
+  garbled live transcript, both deployed** (2026-09-14). The user's
+  browser check found two bugs behind "the conversation is smooth but
+  booking says it can't access the schedule system and the transcript
+  is broken".
+  **The booking half — an IAM ARN-shape gap, not a missing grant.**
+  A live probe captured the sub-agent's `tool_result`:
+  `AccessDeniedException` on `bedrock:InvokeModelWithResponseStream`
+  for `arn:aws:bedrock:::foundation-model/anthropic.claude-sonnet-4-6`
+  — a **region-less** ARN. The runtime role's policy granted only the
+  region-scoped shape
+  (`arn:aws:bedrock:us-east-1::foundation-model/*`), which can never
+  match it. Strands' default model id
+  (`global.anthropic.claude-sonnet-4-6`, resolved to the
+  region-prefixed inference profile) authorizes against the
+  region-less *underlying* foundation-model ARN, while Nova Sonic's
+  bidirectional stream authorizes against the region-scoped one — the
+  same model id needs **both** shapes granted (confirmed with
+  `aws iam simulate-principal-policy` before and after). Fix:
+  `agent_stack.py`'s `InvokeBedrockFoundationModels` statement now
+  carries both ARNs, with a comment recording the live denial. Agent
+  stack redeployed; the simulator reads `allowed` for both shapes.
+  Probe-verified end to end to the quota boundary: the
+  `scheduling_assistant` `tool_use` now returns a `tool_result`
+  — carrying `ModelThrottledException` ("Too many tokens per day"),
+  the account's daily cap, which the probing itself exhausted; the
+  authorization denial is gone. Two probe-side facts worth keeping:
+  Nova Sonic drops a session when input audio gaps exceed 55s
+  ("Timed out waiting for audio bytes or interactive content") — a
+  probe must stream silence like a real mic does, and the browser UI
+  already does (mic auto-start) — and the sub-agent takes tens of
+  seconds, so a capture window must not close on it.
+  **The transcript half — the state machine didn't match the wire.**
+  The probe's event dump established the real transcript-event model:
+  patient speech arrives as ONE `is_final: true` event whose text is
+  the COMPLETE utterance (no interims), assistant speech arrives only
+  as `is_final: false` sentence deltas padded with significant
+  leading whitespace, and no completion event ever comes. The old
+  reducer appended a user final to its own partials (duplicating
+  every word), concatenated raw assistant deltas (literal `\n\n` and
+  leading spaces in the transcript line), and wiped the assistant's
+  live line when the patient spoke again (replies vanished). Rewrote
+  `frontend/src/voice/lib/transcriptReducer.ts` via TDD (5 tests RED
+  on the old code, 41/41 frontend tests GREEN after): whitespace
+  normalised everywhere, a final replaces its role's partial
+  accumulation, and the other role's live line is committed as a turn
+  the moment the conversation moves on. Built and deployed: the
+  Frontend stack redeployed and the live HTML now serves the new
+  bundle (`index-fB9xvWRV.js`). Scratch probes deleted after the
+  evidence was read.
+
 - **Fixed the deployed runtime refusing every call with ImportError,
   and dropped production from the pre-submission path** (2026-09-14).
   The user's first voice-UI attempt at the deployed frontend showed
@@ -2781,6 +2832,17 @@ Completed. The numbered list is renumbered accordingly.
    upgrade; the cap pins it. The human check can proceed against the
    deployed URL right now (greeting half; the sub-agent half still
    waits on the token quota).
+   **Second incident fixed (2026-09-14): bookings failed with
+   "difficulties accessing our schedule system", and the transcript
+   box was garbled.** Both root causes found, fixed, and deployed —
+   see the Completed entry ("Fixed the booking sub-agent's
+   foundation-model IAM denial and the garbled live transcript").
+   Probe-verified afterwards: the scheduling sub-agent's call now
+   passes authorization (its `tool_result` came back — with
+   `ModelThrottledException`, the daily token cap, *not*
+   `AccessDeniedException`), so the booking end-to-end check only
+   waits on the quota, and the deployed frontend now carries the
+   rewritten transcript state machine.
 2. **The remaining voice-session verification, then the demo video —
    production is out of the pre-submission path.**
    **User decision (2026-09-14): the dev deployment is the
@@ -2808,7 +2870,12 @@ Completed. The numbered list is renumbered accordingly.
    #1's human check, which can now run against the deployed frontend
    rather than a local dev server) — after the ImportError fix above,
    the runtime answers again (probe-verified), so only the quota
-   timing gates the sub-agent half.
+   timing gates the sub-agent half. The 2026-09-14 booking-IAM and
+   transcript fixes are deployed and probe-verified to the same
+   point: the sub-agent call passes authorization, and the deployed
+   bundle (`index-fB9xvWRV.js`) carries the rewritten transcript
+   state machine — re-run the full checklist (greeting, booking,
+   FAQ, memory) once the daily token quota resets.
 3. **Demo video, AWS Builder ID / builder.aws.com post.** The
    architecture diagram and README half of the old #2 is done (see
    Completed), and the live demo link now exists (the deployed
