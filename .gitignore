@@ -241,3 +241,10 @@ cdk.out/
 
 # Scratch output from the vendoring/verification steps
 vendor/_*.txt
+
+# Internal AI-workflow spec (progress tracker, prompts, session rules) —
+# kept locally, not part of the public repo. Already-tracked files stay
+# tracked until `git rm -r --cached context/` is run.
+context/
+
+docs/

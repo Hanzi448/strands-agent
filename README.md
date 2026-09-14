@@ -1,5 +1,7 @@
 # ClinicPilot
 
+**The AI receptionist that answers every call and lands every booking.**
+
 A multi-tenant, voice-first AI front desk agent for dental and cosmetic
 clinics, built for the AWS "Agents for Humans" hackathon (Strands Agents
 SDK, Professional Agents track).
@@ -13,20 +15,36 @@ architecture is multi-tenant from the data layer up — every record is
 scoped by `clinic_id` — demonstrated with two seeded clinics, one dental
 and one cosmetic, with different hours, services, and FAQ content.
 
-See [`context/project-overview.md`](context/project-overview.md) for the
-full product spec and [`docs/architecture.md`](docs/architecture.md) for a
-diagram of how the pieces fit together.
+- **Live demo**: https://d16aixkgixx5o6.cloudfront.net
+- **Demo video**: recorded alongside the live demo (see the submission form).
+- **Pitch sheet**: [`docs/demo-pitch.html`](docs/demo-pitch.html) — the
+  problem, the audience, and why it matters, printable to PDF.
+- **Architecture diagram**: [`docs/architecture.md`](docs/architecture.md).
 
-## Status
+## Status: deployed and live
 
-The full agent tree, tool layer, background job, staff dashboard, and CDK
-infrastructure are built and verified offline (unit tests, `cdk synth`,
-headless-browser screenshots). **The stack has not yet been deployed to a
-live AWS account** — that needs Docker (to build/push the AgentCore
-container image) and AWS credentials, neither of which the environment this
-was built in has. See
-[`context/progress-tracker.md`](context/progress-tracker.md) for the
-authoritative, up-to-date state of every unit and what remains.
+The full stack is deployed to a live AWS account (`us-east-1`) and was
+verified end to end: agent runtime on Bedrock AgentCore, Nova Sonic voice,
+per-clinic knowledge bases, AgentCore Memory, DynamoDB, Cognito staff
+auth, SES escalation email, EventBridge daily scans, and the CloudFront
+frontend. The staff dashboard shows the seeded clinics' appointments and
+escalations; the patient voice UI takes real calls.
+
+Two demo tenants are seeded:
+
+| Clinic | Login email (staff dashboard) |
+| --- | --- |
+| Bright Smile Dental | `staff+clinic-dental@clinicpilot.demo` |
+| Lumiere Aesthetics | `staff+clinic-cosmetic@clinicpilot.demo` |
+
+The password is the one configured at seed time via the
+`CLINICPILOT_STAFF_DEMO_PASSWORD` environment variable. The patient voice
+UI needs no login — open the link and allow microphone access.
+
+> **Demo note**: the deployment runs on an AWS account with default
+> on-demand Bedrock quotas. Under heavy same-day use the live link may
+> rate-limit; the agent degrades gracefully (it says so) rather than
+> failing silently. Deploying your own stack (below) gets a fresh quota.
 
 ## Architecture
 
@@ -44,8 +62,13 @@ authoritative, up-to-date state of every unit and what remains.
 | Frontend | Vite + React + TypeScript + Tailwind + shadcn/ui |
 | Infrastructure | AWS CDK (Python), `us-east-1` |
 
-Full stack detail, storage model, and the tenant-isolation invariants live
-in [`context/architecture.md`](context/architecture.md).
+Patient speaks → Nova Sonic real-time voice → Orchestrator agent routes to
+a specialist sub-agent (Scheduling / FAQ / Escalation) → tools read &
+write the clinic's real data → agent answers by voice, staff see the
+result instantly. Sub-agents are only ever called as tools by the
+Orchestrator, and all business logic lives in one shared tools layer used
+by both the live agent and the background job — so tenancy isolation is an
+invariant, not a feature flag.
 
 ## Repository layout
 
@@ -63,8 +86,7 @@ frontend/
   src/dashboard/  Staff dashboard UI
   src/shared/     Shared components, design tokens, API client
 seed/        Demo clinic seed scripts (config, sample appointments, FAQ docs)
-docs/        Architecture diagram and other submission assets
-context/     The spec this project is built against (read this first)
+docs/        Architecture diagram, pitch sheet, design docs
 vendor/      Vendored AWS sample repo, kept as reference code
 ```
 
@@ -106,12 +128,10 @@ Run from the **repository root**, not `backend/` — `seed/` lives next to
 backend\.venv\Scripts\python -m seed.run_seed --dry-run
 ```
 
-Running any of these for real (a live text/voice call, a real `cdk deploy`,
-a real seed run) needs AWS credentials and, for the deploy, Docker — see
-`context/progress-tracker.md` → Session Notes for the exact commands and
-why they're currently blocked in the build environment.
+## Deploying your own stack
 
-## Deploying (and the live demo link)
+Prerequisites: AWS credentials for the target account, Docker running
+(for the AgentCore container image build/push), Node.js, and Python 3.11+.
 
 The SPA reads its config (`VITE_*`) from `frontend/.env` at **build**
 time — see `frontend/.env.example` for the mapping from each variable
@@ -119,7 +139,9 @@ to the stack output it comes from. So the deploy order is:
 
 1. `cdk deploy` the data / agent / api / automation stacks
    (from `backend/infra`; the agent stack needs Docker running).
-2. `python -m seed.run_seed` to seed the two demo clinics.
+2. `python -m seed.run_seed` to seed the two demo clinics (set
+   `CLINICPILOT_STAFF_DEMO_PASSWORD` first — it becomes the staff
+   dashboard login).
 3. Copy the stack outputs into `frontend/.env`
    (`DashboardApiUrl`, `StaffUserPoolId`, `StaffUserPoolClientId`,
    `PatientGuestIdentityPoolId`, `PatientGuestRoleArn`,
@@ -132,27 +154,19 @@ to the stack output it comes from. So the deploy order is:
 
 A rebuild + redeploy of the frontend is just steps 4 and 5.
 
+## License
+
+MIT — see [`LICENSE`](LICENSE). (`vendor/` keeps the original MIT-0
+license of the code vendored into it.)
+
 ## Hackathon submission
 
 - **Track**: AWS "Agents for Humans", Strands Agents SDK, Professional
   Agents track.
-- **License**: MIT — see [`LICENSE`](LICENSE). (`vendor/` keeps the
-  original MIT-0 license of the code vendored into it.)
+- **Public repo**: this repository (MIT, license visible in the repo
+  About section).
+- **Demo video**: recorded — live voice call, staff dashboard
+  (appointments, escalations, settings), and the booking flow.
+- **Live demo**: https://d16aixkgixx5o6.cloudfront.net (credentials above).
+- **Pitch sheet**: [`docs/demo-pitch.html`](docs/demo-pitch.html).
 - **Architecture diagram**: [`docs/architecture.md`](docs/architecture.md).
-- **Demo video**: pending — see Status above. **Live demo link**:
-  the deployed frontend stack's `FrontendUrl` output (see "Deploying"
-  above).
-
-## Context files
-
-This project is built against a fixed spec, read in this order every
-session:
-
-1. [`context/progress-tracker.md`](context/progress-tracker.md) — current
-   state and what's next.
-2. [`context/project-overview.md`](context/project-overview.md),
-   [`context/architecture.md`](context/architecture.md),
-   [`context/code-standards.md`](context/code-standards.md),
-   [`context/ui-context.md`](context/ui-context.md).
-3. [`context/ai-workflow-rules.md`](context/ai-workflow-rules.md) — how
-   work is scoped and split.
