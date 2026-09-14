@@ -159,6 +159,18 @@ Update this file after every meaningful implementation change.
   grants the runtime read/write on exactly it. Verified offline —
   **821 tests**, `cdk synth` with the memory resource, env var, and
   grant inspected. Only the redeploy remains. See Completed.
+- **The Settings tab is built, and every dev stack is deployed.**
+  Staff can edit hours/closures/services/slot_minutes through
+  `GET`/`PUT /settings` (`tools/clinics.py` under the same invariants
+  as every other tool), the Settings tab renders it, and the whole
+  dev environment went out in one pass (2026-09-14): Agent (memory
+  resource live, after the service rejected the first namespace
+  spelling), Automation (SES env vars), API (settings routes,
+  live-verified end to end with a throwaway staff user), and Frontend
+  (first real deploy — the live demo link exists). What is left before
+  the submission is human: the voice check over the deployed frontend,
+  then the production stacks, then the video. See Completed and
+  Next Up.
 
 ## Current Goal
 
@@ -199,6 +211,100 @@ Update this file after every meaningful implementation change.
   see Next Up.
 
 ## Completed
+
+- **The Settings tab, both halves, deployed and live-verified** (old
+  Next Up #2 — the user's 2026-09-12 decision, scoped with them this
+  session to all four editable fields, any staff login). Staff can now
+  edit the clinic's hours, closures, services and slot grid in the
+  dashboard, and the same config the voice agent books against changes
+  with it — one `Clinics` item, one writer.
+  **The tool half: `tools/clinics.py`**, the sixth tools module.
+  `get_clinic_config` returns exactly the editable four plus the
+  display-only `name`/`timezone` (DynamoDB `Decimal`s normalised to
+  ints, so the browser never sees `Decimal('15')`);
+  `update_clinic_config` reads the current item through
+  `scheduling.get_clinic` (a `NotFoundError` for an unknown clinic,
+  before any validation runs), eagerly validates all four fields
+  against the same rules `architecture.md` -> Storage Model fixed for
+  the *read* path — all 7 weekday keys, `HH:MM` 24h clinic-local,
+  ascending non-overlapping intervals, close strictly after open, an
+  empty list meaning closed; whole-day `{date, label}` closures with
+  duplicates refused; a non-empty service list with unique ids and
+  positive whole-minute durations; `slot_minutes` a whole 1..1440 —
+  then writes **one** `update_item` with `#name`-aliased `SET`s of the
+  five attributes (the four plus `updated_at`), so a save cannot land
+  half-applied. `lambda/dashboard_api.py` gained `GET`/`PUT /settings`
+  over it (body-parse failures are 400s with their own messages, and a
+  `clinic_id` in the body is ignored — the token's claim is the only
+  clinic the route will touch), and `api_stack.py` wires the routes
+  behind the Cognito authorizer with a `ReadWriteClinicsTable` grant
+  of exactly `GetItem`+`UpdateItem` on the Clinics table.
+  **The frontend half**: `dashboard/lib/settingsForm.ts` (pure
+  immutable form-state helpers, 38 Vitest tests across it and the
+  client change), `dashboardApi.ts` `getClinicConfig`/
+  `updateClinicConfig` (the shared `api.ts` client gained `PUT`),
+  and `SettingsView.tsx` — a weekly-hours editor (one card per
+  weekday, add/remove `open`–`close` intervals, empty = "Closed"),
+  a closures list, a services list, the slot field, and one "Save
+  changes" for the whole config. **No validation in the browser**:
+  the backend is the single validator (Invariants #3), and a refused
+  save shows the server's own message, which names the field.
+  Verified, in order: **868 backend tests** (39 new over
+  `test_clinics.py` + `test_dashboard_api.py`, the clinics suite's
+  fake applying the real `UpdateExpression` and patching the table
+  accessor in *both* modules that import it — an earlier
+  single-module patch silently hit real AWS, caught because the
+  returned closure only exists in the live table); `cdk synth` clean
+  for all five stacks with the settings resource and grant inspected
+  in the template; 38 frontend tests and `npm run build` clean.
+  **Then deployed and live-verified (2026-09-14)**: with the API
+  stack deployed, a throwaway staff user (created in the dev pool,
+  deleted after) signed in and round-tripped the real route — `GET`
+  returned the seeded dental config whole, `PUT` of the same config
+  came back 200, `PUT` of `slot_minutes: 0` was refused 400 with
+  exactly `slot_minutes must be between 1 and 1440 minutes (a full
+  day); got 0.`, and the stored config was unchanged after the
+  refusal. The scratch probe was deleted after passing, per the
+  repo's convention.
+
+- **Fixed the Memory namespace the service refused, and deployed all
+  four dev stacks** (2026-09-14, the session's deploy unit — the
+  user's directive: settings tab first, then one dev deploy of
+  everything, production waits for the voice check).
+  **The bug, found only by deploying**: the first
+  `cdk deploy ClinicPilot-Dev-Agent` failed on the Memory resource
+  with the service's own validation — *"Memory strategy
+  patient_call_summaries is of Summarization type requiring
+  {sessionId} as a mandatory part of namespace"*. The undeployed
+  `agent_stack.py` had declared an actor-scoped
+  `/summaries/actors/{actorId}/`; `cdk synth` passes such a namespace
+  because only the control plane validates it, and the offline drift
+  guard compared the CDK and client spellings against *each other*,
+  both of which were wrong in the same way.
+  **The fix keeps the feature**: the strategy's write namespace is
+  now `/summaries/actors/{actorId}/sessions/{sessionId}/` —
+  session-scoped, as the service requires, under the actor — and
+  `agents/memory.py`'s `retrieve_summary` switched from exact
+  `namespace=` to `namespace_path=` (the SDK's hierarchical
+  *prefix* match), so retrieval still returns every past session's
+  summary under the actor and a returning patient is still
+  recognised. `record_conversation` needed no change: it already
+  passed a fresh `session_id` per call. TDD: both new assertions
+  were written first and watched fail — the drift guard now requires
+  `{sessionId}` *and* `{actorId}` in the CDK template (the sentence
+  that would have caught this before a deploy) and that the client's
+  retrieval prefix is a prefix of the write template; the memory
+  suite pins `namespace_path` over `namespace`. **868 passed**;
+  Agent stack redeployed `UPDATE_COMPLETE` with the memory resource,
+  `CLINICPILOT_MEMORY_ID` in the container, and the SES grant.
+  **The rest of the deploy**: Automation stack (SES env vars) and
+  API stack (settings routes) deployed clean; the Frontend hosting
+  stack deployed for the first time for real —
+  `FrontendUrl = https://d16aixkgixx5o6.cloudfront.net`, serving the
+  fresh SPA bundle (verified: index 200, bundle 200 and 533,690
+  bytes, the exact build with the Settings tab). One operational
+  note: two concurrent `cdk deploy`s race on `cdk.out` — deploy
+  stacks sequentially from the same checkout.
 
 - **AgentCore Memory: per-patient rolling call summaries** (Next Up #2,
   both halves in one unit per its implementation plan — the plan bundled
@@ -275,10 +381,11 @@ Update this file after every meaningful implementation change.
   not wired for memory — only the two voice interfaces are, because
   the typed CLI is a developer interface and the spec scoped memory to
   the call paths. A small follow-up unit if ever wanted.
-  **Not verified, and cannot be here**: a real summary surviving
-  between two real calls — it needs the Agent stack redeployed (the
-  memory resource and env var are undeployed, folded into Next Up
-  #3's redeploy) and two live calls with a booking in the first.
+  **Not verified yet, but no longer blocked on a deploy** (the Agent
+  stack now carries the memory resource, the env var, and the fixed
+  session-scoped-under-actor namespace — see the 2026-09-14 Completed
+  entry): a real summary surviving between two real calls needs two
+  live calls with a booking in the first, which is the voice check.
 
 - **Escalation email notifications** (old Next Up #2, both halves —
   `project-overview.md`'s "Escalation to staff (email + dashboard)" and
@@ -331,9 +438,9 @@ Update this file after every meaningful implementation change.
   and the Automation Lambda's `SendSesEmail` statement and three
   email env vars, all present and scoped to `identity/*` in this
   account/region.
-  **Not verified, and cannot be here**: a real send and a real email
-  in an inbox — it needs the Agent and Automation stacks redeployed
-  (folded into Next Up #4) and an escalation actually raised; SES
+  **Not verified yet, but no longer blocked on a deploy** (both stacks
+  redeployed 2026-09-14 with the grant and env vars): a real send and
+  a real email in an inbox needs an escalation actually raised; SES
   sandbox sends from and to `VERIFIED_SES_ADDRESS`, which is already
   the verified identity the reminder path uses.
 - **The frontend hosting stack** (`backend/infra/frontend_stack.py`,
@@ -387,10 +494,12 @@ Update this file after every meaningful implementation change.
   references the OAC with the empty-identity `S3OriginConfig`
   CloudFront requires alongside it, and both error responses and the
   `FrontendUrl` output are present.
-  **Not verified, and cannot be here**: the actual deploy and a live
-  URL — it needs credentials and `frontend/.env` filled from the
-  deployed stacks' outputs first (README "Deploying", steps 1-5), and
-  is folded into Next Up #6.
+  **Deployed 2026-09-14** (see the session's Completed entry): the
+  stack's first real deploy serves the SPA at
+  `https://d16aixkgixx5o6.cloudfront.net`, with `frontend/.env`
+  already carrying the deployed stacks' outputs — none of which
+  change on an in-place update, so the build-time config stayed
+  valid.
 
 - **Fixed "technical trouble" on every booking: the runtime role could
   not invoke the sub-agents' text model** (found during Next Up #1's
@@ -2609,43 +2718,46 @@ Completed. The numbered list is renumbered accordingly.
    **What remains is the human check only**: a real browser session —
    a person listening and speaking, no probe substitutes for hearing
    the agent — with the auto-started mic behind it.
-2. **Settings tab** — editable hours and services (user decision,
-   2026-09-12): staff edit hours/closures/services in the dashboard,
-   writing to the Clinics table. Needs a new authenticated write route
-   plus validation — backend unit first, then its frontend half.
-3. Deploy `agentcore_app.py` to the AgentCore Runtime and verify one
-   voice session end-to-end. **Status note (2026-09-12): the user
-   reports the CDK deploy and seed have now been run and the frontend
-   tested locally** — the "blocked in this environment" caveats that
-   used to sit on this item predate that report. What it still needs is
-   the real voice-session verification (a browser pointed at the
-   deployed `/ws` with a seeded clinic behind it), which item #1's UI is
-   what makes possible. Whether the KB-swap resume steps in "In
-   Progress" were part of the reported deploy is unconfirmed; read that
-   section before touching the Agent stack. The Agent and Automation
-   stacks also now carry the escalation-email SES grant and env vars
-   (old #2) undeployed — redeploy both to make escalation emails live.
-   **Deploy-time note (2026-09-14, AgentCore Memory): the next
-   `cdk deploy ClinicPilot-Dev-Agent` now also creates the memory
-   resource and injects `CLINICPILOT_MEMORY_ID` into the container —
-   the deploy must succeed before that variable exists, so memory is
-   simply off in the container until it does (by design: unset means
-   disabled no-op). The same deploy picks up the escalation-email SES
-   grant, so one Agent-stack deploy covers both.**
-4. **Demo video, live demo link, AWS Builder ID / builder.aws.com
-   post.** The architecture diagram and README half of the old #2 is
-   done (see Completed) — a root `LICENSE` (MIT) and
-   `docs/architecture.md` (a Mermaid system diagram plus a reading
-   guide tying it back to `architecture.md` -> Invariants) now exist
-   too, alongside a rewritten root `README.md` covering status, stack,
-   repo layout, local run instructions for every piece that *can* run
-   here (tests, `cdk synth`, frontend build, seed `--dry-run`), and a
-   submission checklist. The hosting stack's code is done too (the
-   old #3, see Completed); what remains of this item is deploying it
-   per the README's "Deploying" section for the live demo link
-   (`FrontendUrl` output), the verified voice session (#3) for
-   something real to film, and an AWS Builder ID — an account signup
-   only the user can do.
+   **Status (2026-09-13 22:46 UTC): ready for the human check, with
+   one caveat.** The Anthropic use-case form is submitted (user
+   report, this session). A fresh live probe through the deployed
+   `/ws` — basic-flow guest credentials, presign, handshake,
+   `bidi_connection_start`, spoken greeting back — answered clean,
+   so the whole wire chain works right now. But the account's
+   on-demand daily token quota is exhausted *again* ("Too many
+   tokens per day" on both the Claude Sonnet 4.6 inference profile
+   and Nova Micro; the cross-region daily quotas read `0.0` in
+   Service Quotas), so every sub-agent call — bookings, FAQ answers
+   — will fail until it resets. Nova Sonic itself is unaffected
+   (its only listed quota is 20 concurrent requests, and the probe
+   just spoke). A browser session now can check the greeting, the
+   mic auto-start and the conversation; the booking/FAQ half of the
+   check needs the quota back (yesterday's pattern: worked, then
+   throttled, then resets — reset time unconfirmed, midnight UTC
+   the usual suspect).
+2. **The remaining voice-session verification, then production.**
+   The dev deploy (2026-09-14) covered everything that was waiting:
+   the Agent stack now carries the AgentCore Memory resource and
+   `CLINICPILOT_MEMORY_ID` (after the namespace fix, see Completed),
+   the escalation-email SES grant and env vars, and a rebuilt
+   container; the Automation stack carries its SES env vars; the API
+   stack carries the `/settings` routes (live-verified, see Completed);
+   and the Frontend hosting stack is deployed for real, serving the
+   SPA with the Settings tab at
+   `https://d16aixkgixx5o6.cloudfront.net` (the `FrontendUrl` output —
+   the hackathon's live demo link). What remains is what a deploy
+   cannot do: **one real voice session a person listens to** (item
+   #1's human check, which can now run against the deployed frontend
+   rather than a local dev server), and then — the user's stated order
+   (2026-09-14) — the **production** stacks (`CLINICPILOT_ENV=prod`),
+   which wait until after the voice check.
+3. **Demo video, AWS Builder ID / builder.aws.com post.** The
+   architecture diagram and README half of the old #2 is done (see
+   Completed), and the live demo link now exists (the deployed
+   `FrontendUrl`, item #2). What remains is the demo video (which
+   wants the verified voice session from #1 for something real to
+   film) and an AWS Builder ID — an account signup only the user can
+   do.
 
 ## Open Questions
 

@@ -124,13 +124,19 @@ KB_ID_ENV_PREFIX = "CLINICPILOT_KB_ID_"
 # `memory.MEMORY_ID_ENV`.
 MEMORY_ID_ENV = "CLINICPILOT_MEMORY_ID"
 
-# The namespace the SUMMARIZATION strategy consolidates into. Actor-
-# scoped on purpose: the strategy's default namespace is session-
-# scoped, which would make every call's summary invisible to the next.
-# `{actorId}` is resolved by the AgentCore service; the client-side
-# spelling lives in `agents/memory.py` (`NAMESPACE_TEMPLATE`), and the
-# same test keeps the two from drifting.
-MEMORY_NAMESPACE_TEMPLATE = "/summaries/actors/{actorId}/"
+# The namespace the SUMMARIZATION strategy consolidates into, per
+# session, under the actor. `{sessionId}` is not optional: the AgentCore
+# service refuses to create a SUMMARIZATION strategy whose namespace
+# lacks it (learned from a live deploy refusal, 2026-09-14 -- `cdk
+# synth` passes, only `cdk deploy` hits the validation). Actor scoping
+# is kept by construction -- one patient's subtree is unreachable from
+# another clinic's session (`architecture.md` -> Invariants #1) -- and
+# the cross-call half lives in the read: `agents/memory.py` retrieves
+# by the actor path prefix, so every past session's summary is visible
+# to the next call. `{actorId}`/`{sessionId}` are resolved by the
+# AgentCore service, and `tests/test_schema_matches_infra.py` fails if
+# the client-side prefix ever stops matching this template.
+MEMORY_NAMESPACE_TEMPLATE = "/summaries/actors/{actorId}/sessions/{sessionId}/"
 
 
 def _knowledge_base_id_env_var(clinic_id: str) -> str:
@@ -327,10 +333,12 @@ class AgentStack(Stack):
         """Provision the AgentCore Memory holding each patient's summary.
 
         One memory resource for the whole project, one SUMMARIZATION
-        strategy writing into an actor-scoped namespace: `{clinic_id}#
-        {patient_id}` is the actor (`agents/memory.py` -> `actor_id`),
-        so a patient's rolling summary accumulates across calls and is
-        unreachable from another clinic's session by construction
+        strategy writing into a session-scoped namespace under the
+        actor: `{clinic_id}#{patient_id}` is the actor
+        (`agents/memory.py` -> `actor_id`) and each call is its own
+        session, so a patient's summaries accumulate across calls --
+        read back by actor path prefix -- and are unreachable from
+        another clinic's session by construction
         (`architecture.md` -> Invariants #1). The runtime's grants and
         env var are the only wiring this stack adds; the read and write
         paths themselves live in the agent code.

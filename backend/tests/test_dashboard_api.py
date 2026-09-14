@@ -38,6 +38,7 @@ def cognito_event(
     path_params: dict[str, str] | None = None,
     query_params: dict[str, str] | None = None,
     claims_override: dict[str, Any] | None = None,
+    body: str | None = None,
 ) -> dict[str, Any]:
     """One API Gateway REST proxy-integration event behind a Cognito authorizer."""
     claims: dict[str, Any] = {} if clinic_id is None else {"custom:clinic_id": clinic_id}
@@ -48,6 +49,7 @@ def cognito_event(
         "resource": resource,
         "pathParameters": path_params,
         "queryStringParameters": query_params,
+        "body": body,
         "requestContext": {"authorizer": {"claims": claims}},
     }
 
@@ -293,3 +295,123 @@ def test_success_response_always_has_a_null_error(monkeypatch: pytest.MonkeyPatc
     )
     response = dashboard_api.handler(cognito_event("GET", "/escalations"))
     assert body_of(response)["error"] is None
+
+
+# --------------------------------------------------------------------------
+# Settings routes: the clinic config the Settings tab reads and writes
+# --------------------------------------------------------------------------
+
+SETTINGS_BODY = {
+    "hours": {
+        "mon": [{"open": "09:00", "close": "17:00"}],
+        "tue": [{"open": "09:00", "close": "17:00"}],
+        "wed": [],
+        "thu": [{"open": "09:00", "close": "17:00"}],
+        "fri": [{"open": "09:00", "close": "17:00"}],
+        "sat": [],
+        "sun": [],
+    },
+    "closures": [],
+    "services": [{"id": "checkup", "name": "Check-up", "duration_minutes": 20}],
+    "slot_minutes": 20,
+}
+
+
+def test_get_settings_returns_the_config_for_the_token_clinic(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_get(clinic_id: str) -> dict[str, Any]:
+        captured["clinic_id"] = clinic_id
+        return {"name": "Bright Smile Dental", "slot_minutes": 15}
+
+    monkeypatch.setattr(dashboard_api, "get_clinic_config", fake_get)
+    response = dashboard_api.handler(cognito_event("GET", "/settings"))
+    assert response["statusCode"] == 200
+    assert captured["clinic_id"] == CLINIC_ID
+    assert body_of(response)["data"]["slot_minutes"] == 15
+
+
+def test_put_settings_forwards_the_four_fields_and_the_token_clinic(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_update(clinic_id: str, **fields: Any) -> dict[str, Any]:
+        captured.update(clinic_id=clinic_id, **fields)
+        return {"name": "Bright Smile Dental", **fields}
+
+    monkeypatch.setattr(dashboard_api, "update_clinic_config", fake_update)
+    response = dashboard_api.handler(
+        cognito_event("PUT", "/settings", body=json.dumps(SETTINGS_BODY))
+    )
+    assert response["statusCode"] == 200
+    assert captured == {"clinic_id": CLINIC_ID, **SETTINGS_BODY}
+    assert body_of(response)["data"]["slot_minutes"] == 20
+
+
+def test_a_clinic_id_in_the_settings_body_is_ignored(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same rule as the query-string test above: only the token's claim
+    reaches the tool layer (`architecture.md` -> Invariants #1)."""
+    captured: dict[str, Any] = {}
+
+    def fake_update(clinic_id: str, **fields: Any) -> dict[str, Any]:
+        captured.update(clinic_id=clinic_id, fields=fields)
+        return {}
+
+    monkeypatch.setattr(dashboard_api, "update_clinic_config", fake_update)
+    smuggled = {**SETTINGS_BODY, "clinic_id": "clinic-cosmetic"}
+    dashboard_api.handler(
+        cognito_event("PUT", "/settings", body=json.dumps(smuggled))
+    )
+    assert captured["clinic_id"] == CLINIC_ID
+    assert "clinic_id" not in captured["fields"]
+
+
+@pytest.mark.parametrize("body", [None, "", "{not json"])
+def test_an_unparseable_settings_body_is_a_400_not_a_500(
+    body: str | None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The route owns its own body parsing, so an unreadable body is the
+    caller's fault, not an internal error."""
+    monkeypatch.setattr(
+        dashboard_api, "update_clinic_config", lambda *a, **k: pytest.fail(
+            "no write should happen for an unreadable body"
+        )
+    )
+    response = dashboard_api.handler(cognito_event("PUT", "/settings", body=body))
+    assert response["statusCode"] == 400
+    assert body_of(response)["data"] is None
+
+
+def test_settings_validation_errors_reach_the_form_verbatim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The tool layer's message is what the form shows next to the field,
+    so it passes through untranslated, like every other tool error here."""
+
+    def fake_update(clinic_id: str, **fields: Any) -> dict[str, Any]:
+        raise ValidationError("hours.mon must close strictly after it opens.")
+
+    monkeypatch.setattr(dashboard_api, "update_clinic_config", fake_update)
+    response = dashboard_api.handler(
+        cognito_event("PUT", "/settings", body=json.dumps(SETTINGS_BODY))
+    )
+    assert response["statusCode"] == 400
+    assert (
+        body_of(response)["error"] == "hours.mon must close strictly after it opens."
+    )
+
+
+def test_every_response_allows_put_in_cors(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The settings save is a PUT; a CORS allow-list without it would make
+    every save fail in the browser with a preflight error no amount of
+    frontend code can catch."""
+    monkeypatch.setattr(
+        dashboard_api, "get_clinic_config", lambda clinic_id: {}
+    )
+    response = dashboard_api.handler(cognito_event("GET", "/settings"))
+    assert "PUT" in response["headers"]["Access-Control-Allow-Methods"]

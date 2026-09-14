@@ -37,7 +37,7 @@ function isApiEnvelope(body: unknown): body is ApiEnvelope {
 export interface ApiRequest {
   baseUrl: string;
   path: string;
-  method?: "GET" | "POST";
+  method?: "GET" | "POST" | "PUT";
   token?: string | null;
   query?: Record<string, string | number | undefined>;
   body?: unknown;

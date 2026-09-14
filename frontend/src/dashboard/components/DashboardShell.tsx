@@ -4,6 +4,7 @@ import { Sidebar, type DashboardTab } from "@/dashboard/components/Sidebar";
 import { TopBar } from "@/dashboard/components/TopBar";
 import { AppointmentsView } from "@/dashboard/components/AppointmentsView";
 import { EscalationsView } from "@/dashboard/components/EscalationsView";
+import { SettingsView } from "@/dashboard/components/SettingsView";
 import type { StaffUser } from "@/dashboard/lib/auth";
 
 interface DashboardShellProps {
@@ -24,11 +25,7 @@ export function DashboardShell({ user, onSignOut }: DashboardShellProps) {
         <main className="flex-1 p-6">
           {tab === "appointments" && <AppointmentsView />}
           {tab === "escalations" && <EscalationsView />}
-          {tab === "settings" && (
-            <p className="text-sm text-[var(--text-muted)]">
-              Nothing configurable here yet.
-            </p>
-          )}
+          {tab === "settings" && <SettingsView />}
         </main>
       </div>
     </div>

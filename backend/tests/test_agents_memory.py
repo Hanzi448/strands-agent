@@ -121,7 +121,11 @@ def test_the_summary_is_the_records_text(
     assert summary == "Calls about cleanings; prefers mornings."
     assert client.retrieved == {
         "memory_id": "mem_one",
-        "namespace": "/summaries/actors/clinic-dental#pat_one/",
+        # A path prefix, not an exact namespace: the strategy writes
+        # each call's summary under a session-scoped namespace (the
+        # service requires `{sessionId}` there), so retrieval must
+        # match everything under the actor, across sessions.
+        "namespace_path": "/summaries/actors/clinic-dental#pat_one/",
         "query": memory.RETRIEVAL_QUERY,
         "top_k": 3,
     }

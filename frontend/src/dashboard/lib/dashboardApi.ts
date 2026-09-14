@@ -1,5 +1,6 @@
 import { apiRequest } from "@/shared/lib/api";
 import { getIdToken } from "@/dashboard/lib/auth";
+import type { ClinicConfig, ClinicConfigPayload } from "@/dashboard/lib/settingsForm";
 import type { AppointmentsForDay, Escalation } from "@/dashboard/types";
 
 /**
@@ -16,7 +17,11 @@ const baseUrl = import.meta.env.VITE_DASHBOARD_API_URL;
 
 async function authorizedRequest<T>(
   path: string,
-  options: { method?: "GET" | "POST"; query?: Record<string, string | number | undefined> } = {},
+  options: {
+    method?: "GET" | "POST" | "PUT";
+    query?: Record<string, string | number | undefined>;
+    body?: unknown;
+  } = {},
 ): Promise<T> {
   const token = await getIdToken();
   if (!token) {
@@ -52,4 +57,20 @@ export function resolveEscalation(escalationId: string): Promise<Escalation> {
     `/escalations/${encodeURIComponent(escalationId)}/resolve`,
     { method: "POST" },
   );
+}
+
+/** `GET /settings` -- the clinic config the Settings tab edits. */
+export function getClinicConfig(): Promise<ClinicConfig> {
+  return authorizedRequest<ClinicConfig>("/settings");
+}
+
+/** `PUT /settings` -- save the edited config. Full replacement: the
+ * server validates every field (`tools.clinics.update_clinic_config`)
+ * and refuses the whole save on any malformed one, so a rejected
+ * promise carries the field-level message to show next to the form. */
+export function updateClinicConfig(config: ClinicConfigPayload): Promise<ClinicConfig> {
+  return authorizedRequest<ClinicConfig>("/settings", {
+    method: "PUT",
+    body: config,
+  });
 }

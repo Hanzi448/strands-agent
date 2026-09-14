@@ -12,6 +12,10 @@ Modules:
     errors: the exception vocabulary tools raise.
     scheduling: availability -- and the only place clinic-local wall-clock
         time is converted to and from the UTC everything else stores.
+    clinics: the staff-editable availability config -- the Settings tab's
+        read and write. Validation is eager here, because a malformed
+        config written to the table would fail lazily inside
+        `scheduling`, with a patient on the line.
     patients: the phone-number lookup a voice caller arrives by, and the
         rule for when two calls are the same person.
     booking: `book_appointment` -- the first write. Decides nothing about

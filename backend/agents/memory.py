@@ -46,13 +46,15 @@ logger = logging.getLogger(__name__)
 # no-ops -- set by `agent_stack.py` to the deployed memory resource's id.
 MEMORY_ID_ENV: Final[str] = "CLINICPILOT_MEMORY_ID"
 
-# Where a patient's summary lives. The strategy the CDK declares writes
-# to `/summaries/actors/{actorId}/` -- actor-scoped, *not* session-
-# scoped like the strategy's default, which is what makes one call's
-# summary visible to the next. This constant is the client-side spelling
-# of the same path: the `{actor_id}` placeholder is filled with the
-# composite `actor_id` builds, and `tests/test_schema_matches_infra.py`
-# fails if it ever disagrees with the stack's own template.
+# Where a patient's summaries live, as a retrieval path prefix. The
+# strategy the CDK declares writes each call's summary into a session-
+# scoped namespace under this path -- the AgentCore service requires
+# `{sessionId}` in a SUMMARIZATION namespace (learned from a live deploy
+# refusal, 2026-09-14), so the write is per-session while the read is
+# the actor's whole subtree: one call's summary is visible to the next.
+# This constant is the client-side spelling of that prefix, and
+# `tests/test_schema_matches_infra.py` fails if it ever stops being a
+# prefix of the stack's own write template.
 NAMESPACE_TEMPLATE: Final[str] = "/summaries/actors/{actor_id}/"
 
 # `MemoryClient.retrieve_memories` requires a search query even for an
@@ -95,7 +97,11 @@ def retrieve_summary(actor: str) -> str | None:
     try:
         records = _client().retrieve_memories(
             memory_id=memory_id,
-            namespace=NAMESPACE_TEMPLATE.format(actor_id=actor),
+            # `namespace_path`, not `namespace`: the strategy's write
+            # namespaces are session-scoped (one per call), so an exact
+            # match would find only a session this caller never had.
+            # A path prefix matches the actor's every session.
+            namespace_path=NAMESPACE_TEMPLATE.format(actor_id=actor),
             query=RETRIEVAL_QUERY,
             top_k=RETRIEVAL_TOP_K,
         )

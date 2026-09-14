@@ -30,7 +30,8 @@ Completed); this stack only wires them up:
   - One REST API Gateway, its resources matching
     `dashboard_api._ROUTES` exactly -- `/appointments` (GET),
     `/escalations` (GET), `/escalations/{escalation_id}` (GET),
-    `/escalations/{escalation_id}/resolve` (POST) -- each behind a
+    `/escalations/{escalation_id}/resolve` (POST), `/settings` (GET and
+    PUT, the Settings tab's read and write) -- each behind a
     Cognito user-pool authorizer, so an unauthenticated or wrong-pool
     token never reaches the Lambda at all (`architecture.md` ->
     Invariants #5). Explicit resources rather than one `{proxy+}`
@@ -41,12 +42,15 @@ Completed); this stack only wires them up:
     `backend/`'s own `lambda/` and `tools/` directories, so it calls the
     same `backend/tools/` functions the voice agent and the background
     job do, never a duplicate copy (`architecture.md` -> Invariants #3).
-  - An execution role scoped to exactly what `tools/appointments.py` and
-    `tools/escalations.py` call for this Lambda (verified against those
-    modules, not assumed): `Query` on `Appointments`' `by-start-time`
-    index for `list_appointments_for_clinic`; `Query` on `Escalations`'
+  - An execution role scoped to exactly what `tools/appointments.py`,
+    `tools/escalations.py` and `tools/clinics.py` call for this Lambda
+    (verified against those modules, not assumed): `Query` on
+    `Appointments`' `by-start-time` index for
+    `list_appointments_for_clinic`; `Query` on `Escalations`'
     `by-created-at` index for `list_open_escalations`, plus `GetItem` and
-    `UpdateItem` for `get_escalation`/`resolve_escalation`
+    `UpdateItem` for `get_escalation`/`resolve_escalation`; `GetItem`
+    and `UpdateItem` on `Clinics` for the Settings tab's
+    `get_clinic_config`/`update_clinic_config`
     (`code-standards.md` -> AWS CDK forbids a blanket resource/action
     grant).
   - The patient-facing guest-identity **Cognito identity pool**
@@ -143,6 +147,7 @@ class ApiStack(Stack):
         construct_id: str,
         *,
         config: ProjectConfig,
+        clinics_table: dynamodb.ITableV2,
         appointments_table: dynamodb.ITableV2,
         escalations_table: dynamodb.ITableV2,
         agent_runtime: agentcore.Runtime,
@@ -150,6 +155,7 @@ class ApiStack(Stack):
     ) -> None:
         super().__init__(scope, construct_id, **kwargs)
         self.config = config
+        self.clinics_table = clinics_table
         self.appointments_table = appointments_table
         self.escalations_table = escalations_table
 
@@ -286,10 +292,15 @@ class ApiStack(Stack):
         resolve = escalation.add_resource("resolve")
         resolve.add_method("POST", integration, **secured)
 
+        settings = api.root.add_resource("settings")
+        settings.add_method("GET", integration, **secured)
+        settings.add_method("PUT", integration, **secured)
+
         # Scoped to exactly the calls `dashboard_api.py`'s routes make
-        # (verified against `tools/appointments.py` and
-        # `tools/escalations.py`, not assumed) -- the same style
-        # `automation_stack.py`'s and `agent_stack.py`'s roles document.
+        # (verified against `tools/appointments.py`,
+        # `tools/escalations.py` and `tools/clinics.py`, not assumed) --
+        # the same style `automation_stack.py`'s and `agent_stack.py`'s
+        # roles document.
         for sid, table, actions in (
             (
                 "ReadAppointmentsTable",
@@ -300,6 +311,15 @@ class ApiStack(Stack):
                 "ReadWriteEscalationsTable",
                 self.escalations_table,
                 ["dynamodb:GetItem", "dynamodb:Query", "dynamodb:UpdateItem"],
+            ),
+            (
+                # The Settings tab: `get_clinic_config` reads the item,
+                # `update_clinic_config` replaces the four config
+                # attributes on it. No Query -- a clinic is only ever
+                # fetched by its own id.
+                "ReadWriteClinicsTable",
+                self.clinics_table,
+                ["dynamodb:GetItem", "dynamodb:UpdateItem"],
             ),
         ):
             resources = [table.table_arn]

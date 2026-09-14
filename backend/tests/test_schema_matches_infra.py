@@ -163,11 +163,21 @@ def test_memory_id_env_var_matches_the_agent_stack() -> None:
 
 
 def test_memory_namespace_template_matches_the_agent_stack() -> None:
-    """The namespace the strategy writes to (CDK, `{actorId}` resolved by
-    the service) and the namespace the runtime retrieves from
-    (`agents/memory.py`, `{actor_id}` filled client-side) must be the
-    same path shape, or summaries land where retrieval never looks --
-    every caller a first-time caller, forever, with no error anywhere.
+    """The namespace the strategy writes to (CDK, `{actorId}`/`{sessionId}`
+    resolved by the service) and the namespace path the runtime retrieves
+    by prefix (`agents/memory.py`, `{actor_id}` filled client-side) must
+    agree as write-and-read halves of one layout, or summaries land where
+    retrieval never looks -- every caller a first-time caller, forever,
+    with no error anywhere.
+
+    Two invariants, the first learned live (2026-09-14 deploy failure):
+    the service **rejects a SUMMARIZATION namespace without `{sessionId}`**
+    ("Memory strategy ... is of Summarization type requiring {sessionId}
+    as a mandatory part of namespace") -- `cdk synth` cannot catch this,
+    only `cdk deploy` can. The second is the drift guard this test has
+    always carried: the client's actor-scoped retrieval prefix must be a
+    path prefix of the strategy's session-scoped write namespace, so
+    retrieval sees every session's summary under the actor.
     """
     from agents import memory
 
@@ -176,12 +186,28 @@ def test_memory_namespace_template_matches_the_agent_stack() -> None:
         f"MEMORY_NAMESPACE_TEMPLATE is defined in agents/memory.py but no"
         f" longer in {AGENT_STACK_PATH.name}."
     )
-    assert agent_stack_constants["MEMORY_NAMESPACE_TEMPLATE"].replace(
-        "{actorId}", "{actor_id}"
-    ) == memory.NAMESPACE_TEMPLATE, (
-        "MEMORY_NAMESPACE_TEMPLATE disagrees between agents/memory.py and"
-        f" {AGENT_STACK_PATH.name}: {memory.NAMESPACE_TEMPLATE!r} vs"
-        f" {agent_stack_constants['MEMORY_NAMESPACE_TEMPLATE']!r}."
+    template = agent_stack_constants["MEMORY_NAMESPACE_TEMPLATE"]
+    assert "{sessionId}" in template, (
+        "The AgentCore service refuses to create a SUMMARIZATION strategy"
+        " whose namespace has no {sessionId} in it (deploy failure,"
+        " 2026-09-14) -- the write namespace must be session-scoped,"
+        f" and {AGENT_STACK_PATH.name}'s is {template!r}."
+    )
+    assert "{actorId}" in template, (
+        "A strategy namespace without {actorId} is not actor-scoped: one"
+        " patient's summaries would be every other patient's retrieval"
+        f" (`architecture.md` -> Invariants #1). {AGENT_STACK_PATH.name}'s"
+        f" is {template!r}."
+    )
+    normalised = template.replace("{actorId}", "{actor_id}").replace(
+        "{sessionId}", "{session_id}"
+    )
+    assert normalised.startswith(memory.NAMESPACE_TEMPLATE), (
+        "The strategy writes into session-scoped namespaces under the"
+        " actor, but `agents/memory.py` retrieves by a path that is not"
+        " their prefix -- summaries would land where retrieval never"
+        f" looks. {memory.NAMESPACE_TEMPLATE!r} vs the write template"
+        f" {template!r}."
     )
 
 

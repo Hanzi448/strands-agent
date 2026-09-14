@@ -48,6 +48,7 @@ from decimal import Decimal
 from typing import Any, Callable
 
 from tools.appointments import list_appointments_for_clinic
+from tools.clinics import get_clinic_config, update_clinic_config
 from tools.errors import (
     ConfigurationError,
     ConflictError,
@@ -164,6 +165,37 @@ def _resolve_escalation(clinic_id: str, event: dict[str, Any]) -> dict[str, Any]
     return resolve_escalation(clinic_id, escalation_id)
 
 
+def _get_settings(clinic_id: str, event: dict[str, Any]) -> dict[str, Any]:
+    return get_clinic_config(clinic_id)
+
+
+def _put_settings(clinic_id: str, event: dict[str, Any]) -> dict[str, Any]:
+    """Save the Settings tab's edited config.
+
+    Body parsing lives here because it is the route's own input, not
+    business logic: an unreadable body is the caller's fault and maps to
+    the same 400 a malformed field gets. Everything else -- which fields
+    exist, what shapes they may take -- is `update_clinic_config`'s to
+    decide, exactly as on every other route here.
+    """
+    raw = event.get("body")
+    if not isinstance(raw, str) or not raw.strip():
+        raise ValidationError("A JSON body with the clinic config is required.")
+    try:
+        body = json.loads(raw)
+    except ValueError as exc:
+        raise ValidationError("The request body must be valid JSON.") from exc
+    if not isinstance(body, dict):
+        raise ValidationError("The request body must be a JSON object.")
+    return update_clinic_config(
+        clinic_id,
+        hours=body.get("hours"),
+        closures=body.get("closures"),
+        services=body.get("services"),
+        slot_minutes=body.get("slot_minutes"),
+    )
+
+
 # `resource` is API Gateway's route *template*, not the literal request
 # path -- `/escalations/{escalation_id}`, not `/escalations/esc_123`.
 _ROUTES: dict[tuple[str, str], Callable[[str, dict[str, Any]], Any]] = {
@@ -171,6 +203,8 @@ _ROUTES: dict[tuple[str, str], Callable[[str, dict[str, Any]], Any]] = {
     ("GET", "/escalations"): _list_escalations,
     ("GET", "/escalations/{escalation_id}"): _get_escalation,
     ("POST", "/escalations/{escalation_id}/resolve"): _resolve_escalation,
+    ("GET", "/settings"): _get_settings,
+    ("PUT", "/settings"): _put_settings,
 }
 
 
@@ -209,7 +243,7 @@ def _response(
             "Content-Type": "application/json",
             "Access-Control-Allow-Origin": "*",
             "Access-Control-Allow-Headers": "Authorization,Content-Type",
-            "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
+            "Access-Control-Allow-Methods": "GET,POST,PUT,OPTIONS",
 	    },
         "body": json.dumps({"data": data, "error": error}, cls=_DecimalEncoder),
     }
